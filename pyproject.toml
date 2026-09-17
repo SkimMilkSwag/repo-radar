@@ -1,0 +1,16 @@
+[project]
+name = "repo-radar"
+version = "0.1.0"
+description = "Snapshot an org's GitHub repos into a local SQLite db — track stars, forks, and language mix over time."
+requires-python = ">=3.8"
+license = { text = "MIT" }
+
+[project.scripts]
+repo-radar = "reporadar.main:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["reporadar*"]
