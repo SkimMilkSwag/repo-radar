@@ -47,9 +47,10 @@ snapshot — the first snapshot has no delta by definition.
 
 | Command | Flags | Notes |
 |---------|-------|-------|
-| `sync OWNER` | `--db PATH` | db defaults to `./repo_radar.db`; owner is any GitHub org or user |
+| `sync OWNER...` | `--db PATH` | db defaults to `./repo_radar.db`; one or more owners per run, all merged into the same db |
 | `top [N]` | `--db PATH` | N defaults to 10 |
 | `history REPO` | `--limit N`, `--db PATH` | N defaults to 20 snapshots |
+| `report` | `--db PATH` | markdown table: per-language totals + growth since the oldest snapshot |
 
 ## Using the db directly
 

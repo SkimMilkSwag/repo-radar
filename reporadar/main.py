@@ -2,14 +2,20 @@
 
 Subcommands:
 
-    sync OWNER [--db PATH]      Fetch OWNER's public repos from GitHub and
-                                upsert them into the local db (default
-                                ./repo_radar.db). Prints a one-line summary.
+    sync OWNER... [--db PATH]   Fetch the owners' public repos from GitHub
+                                and upsert them into the local db (default
+                                ./repo_radar.db).  One or more owners can be
+                                synced in a single run; per-owner errors are
+                                reported without aborting the rest.  Prints
+                                a one-line summary per owner.
     top [N] [--db PATH]         Show the N most-starred tracked repos
                                 (default 10) as a small table.
     history REPO [--limit N]    Print stored snapshots for one repo, newest
                                 first, with star/fork deltas vs the previous
                                 snapshot.
+    report [--db PATH]          Per-language repo count + star/fork totals as
+                                a markdown table, with growth vs the oldest
+                                snapshot in the db.
 
 Exit codes: 0 on success, 1 on API/storage errors, 2 on usage errors
 (argparse's default).
@@ -34,28 +40,43 @@ def _open_db(path: str):
 
 
 def cmd_sync(args) -> int:
-    """Fetch an owner's repos and upsert them into the db."""
+    """Fetch one or more owners' repos and upsert them into the db."""
+    return sync_many(args.owners, args.db)
+
+
+def sync_many(owners: list[str], db_path: str) -> int:
+    """Fetch several owners' repos in one run and merge them into ``db_path``.
+
+    Each owner's repos are normalized and upserted under the same
+    ``full_name`` key, so repos shared by multiple owners (forks) converge
+    to the latest value; per-owner errors are reported and counted instead
+    of aborting the whole run.  Exit status mirrors a single-owner sync:
+    0 when every owner succeeded, 1 when at least one failed.
+    """
     token = os.environ.get("GH_TOKEN")
-    try:
-        raw = list_repos(args.owner, token=token)
-    except APIError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 1
+    failures = 0
+    for owner in owners:
+        try:
+            raw = list_repos(owner, token=token)
+        except APIError as exc:
+            print(f"error: {owner}: {exc}", file=sys.stderr)
+            failures += 1
+            continue
 
-    repos = [normalize_repo(r) for r in raw]
-    conn = _open_db(args.db)
-    try:
-        written = upsert_repos(conn, repos)
-    finally:
-        conn.close()
+        repos = [normalize_repo(r) for r in raw]
+        conn = _open_db(db_path)
+        try:
+            upsert_repos(conn, repos)
+        finally:
+            conn.close()
 
-    s = summarize(repos)
-    langs = ", ".join(f"{k}:{v}" for k, v in list(s["languages"].items())[:5])
-    print(
-        f"synced {written} repo(s) for {args.owner}: "
-        f"{s['total_stars']} stars, {s['total_forks']} forks ({langs})"
-    )
-    return 0
+        s = summarize(repos)
+        langs = ", ".join(f"{k}:{v}" for k, v in list(s["languages"].items())[:5])
+        print(
+            f"synced {len(repos)} repo(s) for {owner}: "
+            f"{s['total_stars']} stars, {s['total_forks']} forks ({langs})"
+        )
+    return 1 if failures else 0
 
 
 def cmd_top(args) -> int:
@@ -106,11 +127,86 @@ def cmd_history(args) -> int:
     return 0
 
 
+def cmd_report(args) -> int:
+    """Print per-language totals as a markdown table.
+
+    Language rows show the current repo count and star/fork sums from the
+    latest state, plus deltas vs the oldest snapshot in this db (i.e.
+    growth since tracking started).  The ``Total`` row covers every
+    tracked repo; when only one snapshot exists, nothing has moved yet,
+    so all deltas are 0.
+    """
+    conn = _open_db(args.db)
+    try:
+        repos = get_repos(conn)
+        history = get_history(conn, full_name=None)
+    finally:
+        conn.close()
+    if not repos:
+        print(f"no repos in {args.db} — run 'repo-radar sync <owner>' first")
+        return 0
+
+    lang_stats: dict[str, dict[str, int]] = {}
+    for row in repos:
+        stats = lang_stats.setdefault(row["language"] or "(none)",
+                                      {"repos": 0, "stars": 0, "forks": 0})
+        stats["repos"] += 1
+        stats["stars"] += row["stars"]
+        stats["forks"] += row["forks"]
+
+    # Baseline = the oldest snapshot in the db; deltas measure everything
+    # since tracking started.  The very first sync has no baseline and
+    # reports 0 across the board.
+    oldest_time = min(h["synced_at"] for h in history)
+    baseline: dict[str, list[int]] = {}
+    for snap in history:
+        if snap["synced_at"] == oldest_time:
+            b = baseline.setdefault(snap["language"] or "(none)", [0, 0])
+            b[0] += snap["stars"]
+            b[1] += snap["forks"]
+
+    def delta_field(lang: str, idx: int) -> str:
+        """+N / -N / 0 vs the baseline; '—' for a language added later."""
+        if lang not in baseline:
+            return "—"
+        current = sum(
+            r["stars" if idx == 0 else "forks"] for r in repos
+            if (r["language"] or "(none)") == lang
+        )
+        return _delta(current - baseline[lang][idx])
+
+    print("# repo-radar report")
+    print()
+    print("| LANG | REPOS | STARS | Δ | FORKS | Δ |")
+    print("| --- | ---: | ---: | ---: | ---: | ---: |")
+    total = {"repos": 0, "stars": 0, "forks": 0}
+    for lang in sorted(lang_stats, key=lambda l: (-lang_stats[l]["stars"], l)):
+        s = lang_stats[lang]
+        for k in total:
+            total[k] += s[k]
+        print(f"| {lang} | {s['repos']} | {s['stars']} "
+              f"| {delta_field(lang, 0)} | {s['forks']} "
+              f"| {delta_field(lang, 1)} |")
+    base_stars = sum(v[0] for v in baseline.values()) or None
+    base_forks = sum(v[1] for v in baseline.values()) or None
+    print(f"| **Total** | {total['repos']} | {total['stars']} "
+          f"| {_fmt_delta(total['stars'], base_stars)} | {total['forks']} "
+          f"| {_fmt_delta(total['forks'], base_forks)} |")
+    return 0
+
+
 def _delta(value: int) -> str:
-    """Format a change as +N / -N / 0 for the history table."""
+    """Format a change as +N / -N / 0 for tables."""
     if value > 0:
         return f"+{value}"
     return str(value)
+
+
+def _fmt_delta(current: int, baseline: int | None) -> str:
+    """Delta vs a baseline; renders ``—`` when there is no baseline yet."""
+    if baseline is None:
+        return "—"
+    return _delta(current - baseline)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -122,8 +218,9 @@ def build_parser() -> argparse.ArgumentParser:
                         version=f"repo-radar {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_sync = sub.add_parser("sync", help="fetch an owner's repos into the db")
-    p_sync.add_argument("owner", help="GitHub org or user name")
+    p_sync = sub.add_parser("sync", help="fetch one or more owners into the db")
+    p_sync.add_argument("owners", nargs="+", metavar="OWNER",
+                        help="GitHub org or user name; repeat to sync several")
     p_sync.add_argument("--db", default=DEFAULT_DB,
                         help=f"SQLite db path (default {DEFAULT_DB})")
     p_sync.set_defaults(func=cmd_sync)
@@ -140,6 +237,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="max snapshots to show (default 20)")
     p_hist.add_argument("--db", default=DEFAULT_DB)
     p_hist.set_defaults(func=cmd_history)
+
+    p_report = sub.add_parser("report", help="per-language totals + growth")
+    p_report.add_argument("--db", default=DEFAULT_DB,
+                          help=f"SQLite db path (default {DEFAULT_DB})")
+    p_report.set_defaults(func=cmd_report)
 
     return parser
 
