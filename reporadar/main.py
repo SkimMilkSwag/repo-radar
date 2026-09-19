@@ -17,6 +17,12 @@ Subcommands:
                                 a markdown table, with growth vs the oldest
                                 snapshot in the db.
 
+``--json`` (top and history) prints the same data as a JSON document
+instead of a table: for ``top`` a list of repo objects; for ``history``
+a list of snapshot objects, each with ``delta_stars`` / ``delta_forks``
+vs the previous snapshot (null on the oldest one).  Both accept
+``--db PATH`` as usual.
+
 Exit codes: 0 on success, 1 on API/storage errors, 2 on usage errors
 (argparse's default).
 """
@@ -24,6 +30,7 @@ Exit codes: 0 on success, 1 on API/storage errors, 2 on usage errors
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 
@@ -80,12 +87,15 @@ def sync_many(owners: list[str], db_path: str) -> int:
 
 
 def cmd_top(args) -> int:
-    """Print the most-starred tracked repos as a fixed-width table."""
+    """Print (or emit as JSON) the most-starred tracked repos."""
     conn = _open_db(args.db)
     try:
         rows = get_repos(conn)[: args.n]
     finally:
         conn.close()
+    if args.json:
+        print(json.dumps([dict(r) for r in rows], indent=2))
+        return 0
     if not rows:
         print(f"no repos in {args.db} — run 'repo-radar sync <owner>' first")
         return 0
@@ -103,26 +113,38 @@ def cmd_top(args) -> int:
 
 
 def cmd_history(args) -> int:
-    """Print a repo's snapshots newest-first with deltas vs the previous one."""
+    """Print (or emit as JSON) a repo's snapshots newest-first with deltas."""
     conn = _open_db(args.db)
     try:
         history = get_history(conn, args.repo, limit=args.limit)
     finally:
         conn.close()
-    if not history:
+
+    # get_history returns newest first; deltas need the older row next.
+    entries = []
+    for i, snap in enumerate(history):
+        prev = history[i + 1] if i + 1 < len(history) else None
+        d_stars = None if prev is None else snap["stars"] - prev["stars"]
+        d_forks = None if prev is None else snap["forks"] - prev["forks"]
+        entries.append((snap, d_stars, d_forks))
+
+    if args.json:
+        payload = [
+            {**dict(snap), "delta_stars": ds, "delta_forks": df}
+            for snap, ds, df in entries
+        ]
+        print(json.dumps(payload, indent=2))
+        return 0
+    if not entries:
         print(f"no history for {args.repo!r} in {args.db}")
         return 0
 
-    # get_history returns newest first; deltas need the older row next.
-    for i, snap in enumerate(history):
-        prev = history[i + 1] if i + 1 < len(history) else None
-        d_stars = d_forks = ""
-        if prev is not None:
-            d_stars = _delta(snap["stars"] - prev["stars"])
-            d_forks = _delta(snap["forks"] - prev["forks"])
+    for snap, d_stars, d_forks in entries:
+        s_delta = "" if d_stars is None else _delta(d_stars)
+        f_delta = "" if d_forks is None else _delta(d_forks)
         print(
-            f"{snap['synced_at']}  stars {snap['stars']:<6}{d_stars:>7}  "
-            f"forks {snap['forks']:<5}{d_forks:>7}"
+            f"{snap['synced_at']}  stars {snap['stars']:<6}{s_delta:>7}  "
+            f"forks {snap['forks']:<5}{f_delta:>7}"
         )
     return 0
 
@@ -229,6 +251,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_top.add_argument("n", nargs="?", type=int, default=10,
                        help="how many rows to print (default 10)")
     p_top.add_argument("--db", default=DEFAULT_DB)
+    p_top.add_argument("--json", action="store_true",
+                       help="print a JSON list of repos instead of a table")
     p_top.set_defaults(func=cmd_top)
 
     p_hist = sub.add_parser("history", help="show a repo's snapshot history")
@@ -236,6 +260,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist.add_argument("--limit", type=int, default=20,
                         help="max snapshots to show (default 20)")
     p_hist.add_argument("--db", default=DEFAULT_DB)
+    p_hist.add_argument("--json", action="store_true",
+                        help="print a JSON list of snapshots (with deltas)")
     p_hist.set_defaults(func=cmd_history)
 
     p_report = sub.add_parser("report", help="per-language totals + growth")

@@ -190,6 +190,59 @@ def test_report_first_snapshot_has_no_deltas(tmp_path, monkeypatch, capsys):
             assert "+" not in line
 
 
+def test_top_json_emits_repo_list(tmp_path, monkeypatch, capsys):
+    import json
+
+    from reporadar.normalize import normalize_repo
+    from reporadar.storage import connect, upsert_repos
+
+    db = str(tmp_path / "r.db")
+    conn = connect(db)
+    upsert_repos(conn, [normalize_repo(RAW), normalize_repo(RAW_B)])
+    conn.close()
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["top", "--json", "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    # a JSON array of repo objects, most-starred first
+    assert isinstance(payload, list) and len(payload) == 2
+    assert payload[0]["full_name"] == "org/alpha"
+    assert payload[0]["stars"] == 100
+    assert payload[1]["language"] == "Go"
+
+
+def test_history_json_includes_deltas(tmp_path, monkeypatch, capsys):
+    import json
+
+    from reporadar.normalize import normalize_repo
+    from reporadar.storage import connect, upsert_repos
+
+    db = str(tmp_path / "r.db")
+    conn = connect(db)
+    upsert_repos(conn, [normalize_repo(RAW)], synced_at="2026-09-15T00:00:00Z")
+    upsert_repos(
+        conn,
+        [normalize_repo({**RAW, "stargazers_count": 103})],
+        synced_at="2026-09-16T00:00:00Z",
+    )
+    conn.close()
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["history", "org/alpha", "--json", "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    # newest first; each entry carries deltas vs the previous snapshot
+    assert len(payload) == 2
+    assert payload[0]["synced_at"] == "2026-09-16T00:00:00Z"
+    assert payload[0]["delta_stars"] == 3
+    # the oldest snapshot has no previous one: null deltas
+    assert payload[1]["delta_stars"] is None
+    assert payload[1]["delta_forks"] is None
+
+
 def test_sync_merges_multiple_owners_into_one_db(tmp_path, monkeypatch, capsys):
     from reporadar.storage import connect, get_repos
 
