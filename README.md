@@ -93,7 +93,7 @@ Offline: the network layer is monkeypatched and every test uses a temp db.
 
 ```bash
 python -m pytest tests/ -q
-# 24 passed
+# 27 passed
 ```
 
 ## License
