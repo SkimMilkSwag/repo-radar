@@ -23,18 +23,25 @@ REPO_COLUMNS = (
 )
 
 
-def normalize_repo(payload: dict) -> dict:
+# GitHub payloads are JSON: loose dicts.  ``Any`` is intentional here —
+# the normalizer is where untyped data becomes typed rows.
+from typing import Any
+
+
+def normalize_repo(payload: dict[str, Any]) -> dict[str, Any]:
     """Map one raw repo payload to a flat row keyed by ``REPO_COLUMNS``.
 
     Missing / null fields become safe defaults: counts default to 0,
     the language and description to ``None`` (SQLite NULL), and archived
     to False.  Nested ``owner.login`` is flattened to ``owner``.
     """
-    owner = payload.get("owner") or {}
+    owner_raw = payload.get("owner")
+    if not isinstance(owner_raw, dict):
+        owner_raw = {}
     return {
         "full_name": payload.get("full_name", ""),
         "name": payload.get("name", ""),
-        "owner": owner.get("login"),
+        "owner": owner_raw.get("login"),
         "description": payload.get("description"),
         "language": payload.get("language"),
         "stars": int(payload.get("stargazers_count") or 0),
@@ -45,7 +52,7 @@ def normalize_repo(payload: dict) -> dict:
     }
 
 
-def summarize(repos: list[dict]) -> dict:
+def summarize(repos: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate normalized rows into a snapshot summary.
 
     Returns repo count, total stars/forks, and a language breakdown

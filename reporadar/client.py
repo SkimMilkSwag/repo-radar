@@ -16,6 +16,9 @@ import os
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
+from email.message import Message
+from typing import Any
 
 # Seconds to wait before retrying a rate-limited (403, remaining=0) request.
 # Kept small: the CLI is a human-paced tool, not a polling service.
@@ -31,7 +34,7 @@ class APIError(Exception):
         self.detail = detail
 
 
-def fetch_json(url: str, token: str | None = None) -> dict | list:
+def fetch_json(url: str, token: str | None = None) -> dict[str, Any] | list[Any]:
     """GET ``url`` and decode the JSON body.
 
     Retries once after ``RATE_LIMIT_SLEEP`` seconds when the response
@@ -48,10 +51,14 @@ def fetch_json(url: str, token: str | None = None) -> dict | list:
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req) as resp:
-                return json.load(resp)
+                payload: dict[str, Any] | list[Any] = json.load(resp)
+                return payload
         except urllib.error.HTTPError as exc:  # 403/404 etc.
             last_exc = exc
-            remaining = (exc.headers or {}).get("X-RateLimit-Remaining")
+            raw_headers: Mapping[str, str] | Message[str, str] = exc.headers
+            if raw_headers is None or not isinstance(raw_headers, Mapping):
+                raw_headers = {}
+            remaining = raw_headers.get("X-RateLimit-Remaining")
             if attempt == 0 and exc.code == 403 and remaining == "0":
                 time.sleep(RATE_LIMIT_SLEEP)
                 continue
@@ -65,7 +72,7 @@ def fetch_json(url: str, token: str | None = None) -> dict | list:
     raise APIError(last_exc.code if last_exc else 0, "rate-limit retry failed")
 
 
-def next_url(headers: dict | None) -> str | None:
+def next_url(headers: Mapping[str, str] | None) -> str | None:
     """Extract the ``rel="next"`` URL from a ``Link`` header, if present."""
     if not headers:
         return None
@@ -77,7 +84,7 @@ def next_url(headers: dict | None) -> str | None:
     return None
 
 
-def list_repos(owner: str, token: str | None = None) -> list[dict]:
+def list_repos(owner: str, token: str | None = None) -> list[dict[str, Any]]:
     """Return every public repo of ``owner`` (follows pagination).
 
     Pages through ``/orgs/{owner}/repos`` or ``/users/{owner}/repos`` —
@@ -86,8 +93,10 @@ def list_repos(owner: str, token: str | None = None) -> list[dict]:
     """
     if token is None:
         token = os.environ.get("GH_TOKEN")
-    url = f"https://api.github.com/users/{owner}/repos?per_page=100&type=public"
-    repos: list[dict] = []
+    url: str | None = (
+        f"https://api.github.com/users/{owner}/repos?per_page=100&type=public"
+    )
+    repos: list[dict[str, Any]] = []
     while url:
         req = urllib.request.Request(
             url,

@@ -32,7 +32,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
+from typing import Any
 
 from . import __version__
 from .client import APIError, list_repos
@@ -42,11 +44,11 @@ from .storage import connect, get_history, get_repos, upsert_repos
 DEFAULT_DB = "repo_radar.db"
 
 
-def _open_db(path: str):
+def _open_db(path: str) -> sqlite3.Connection:
     return connect(path)
 
 
-def cmd_sync(args) -> int:
+def cmd_sync(args: argparse.Namespace) -> int:
     """Fetch one or more owners' repos and upsert them into the db."""
     return sync_many(args.owners, args.db)
 
@@ -86,7 +88,7 @@ def sync_many(owners: list[str], db_path: str) -> int:
     return 1 if failures else 0
 
 
-def cmd_top(args) -> int:
+def cmd_top(args: argparse.Namespace) -> int:
     """Print (or emit as JSON) the most-starred tracked repos."""
     conn = _open_db(args.db)
     try:
@@ -100,7 +102,7 @@ def cmd_top(args) -> int:
         print(f"no repos in {args.db} — run 'repo-radar sync <owner>' first")
         return 0
 
-    def fmt(row) -> str:
+    def fmt(row: dict[str, Any]) -> str:
         lang = (row["language"] or "-")[:12]
         return f"{row['stars']:<6} {row['forks']:<5} {lang:<13} {row['full_name']}"
 
@@ -112,7 +114,7 @@ def cmd_top(args) -> int:
     return 0
 
 
-def cmd_history(args) -> int:
+def cmd_history(args: argparse.Namespace) -> int:
     """Print (or emit as JSON) a repo's snapshots newest-first with deltas."""
     conn = _open_db(args.db)
     try:
@@ -149,7 +151,7 @@ def cmd_history(args) -> int:
     return 0
 
 
-def cmd_report(args) -> int:
+def cmd_report(args: argparse.Namespace) -> int:
     """Print per-language totals as a markdown table.
 
     Language rows show the current repo count and star/fork sums from the
@@ -274,7 +276,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    func = args.func
+    assert callable(func), "subparser missing its handler"
+    return int(func(args))
 
 
 if __name__ == "__main__":

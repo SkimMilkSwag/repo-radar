@@ -14,6 +14,7 @@ defaults to ``./repo_radar.db``.
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 from datetime import datetime, timezone
 
 from .normalize import REPO_COLUMNS
@@ -64,7 +65,7 @@ def connect(db_path: str) -> sqlite3.Connection:
     return conn
 
 
-def upsert_repos(conn: sqlite3.Connection, repos: list[dict],
+def upsert_repos(conn: sqlite3.Connection, repos: list[dict[str, Any]],
                  synced_at: str | None = None) -> int:
     """Upsert normalized rows into ``repos`` and append to ``history``.
 
@@ -102,7 +103,7 @@ def upsert_repos(conn: sqlite3.Connection, repos: list[dict],
     return len(rows)
 
 
-def get_repos(conn: sqlite3.Connection) -> list[dict]:
+def get_repos(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     """Return the current state of every tracked repo, most stars first."""
     cursor = conn.execute(
         "SELECT * FROM repos ORDER BY stars DESC, full_name ASC"
@@ -111,7 +112,7 @@ def get_repos(conn: sqlite3.Connection) -> list[dict]:
 
 
 def get_history(conn: sqlite3.Connection, full_name: str | None = None,
-                limit: int = 100) -> list[dict]:
+                limit: int = 100) -> list[dict[str, Any]]:
     """Return historical snapshots (newest first), optionally one repo."""
     if full_name:
         cursor = conn.execute(
