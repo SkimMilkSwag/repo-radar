@@ -10,9 +10,11 @@ Subcommands:
                                 a one-line summary per owner.
     top [N] [--db PATH]         Show the N most-starred tracked repos
                                 (default 10) as a small table.
-    history REPO [--limit N]    Print stored snapshots for one repo, newest
+    history REPO [--limit N] [--since DAYS]
+                                Print stored snapshots for one repo, newest
                                 first, with star/fork deltas vs the previous
-                                snapshot.
+                                snapshot; --since windows it to the last N
+                                days.
     report [--db PATH]          Per-language repo count + star/fork totals as
                                 a markdown table, with growth vs the oldest
                                 snapshot in the db.
@@ -39,7 +41,7 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from . import __version__
@@ -140,9 +142,13 @@ def cmd_top(args: argparse.Namespace) -> int:
 
 def cmd_history(args: argparse.Namespace) -> int:
     """Print (or emit as JSON) a repo's snapshots newest-first with deltas."""
+    since = None
+    if args.since is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=args.since)
+        since = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
     conn = _open_db(args.db)
     try:
-        history = get_history(conn, args.repo, limit=args.limit)
+        history = get_history(conn, args.repo, limit=args.limit, since=since)
     finally:
         conn.close()
 
@@ -162,7 +168,8 @@ def cmd_history(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2))
         return 0
     if not entries:
-        print(f"no history for {args.repo!r} in {args.db}")
+        window = f" (since {args.since}d ago)" if args.since is not None else ""
+        print(f"no history for {args.repo!r} in {args.db}{window}")
         return 0
 
     for snap, d_stars, d_forks in entries:
@@ -364,6 +371,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist.add_argument("repo", help="repo full name, e.g. owner/name")
     p_hist.add_argument("--limit", type=int, default=20,
                         help="max snapshots to show (default 20)")
+    p_hist.add_argument("--since", type=int, metavar="DAYS", default=None,
+                        help="only show snapshots from the last DAYS days")
     p_hist.add_argument("--db", default=DEFAULT_DB)
     p_hist.add_argument("--json", action="store_true",
                         help="print a JSON list of snapshots (with deltas)")

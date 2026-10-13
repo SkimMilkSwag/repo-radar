@@ -127,6 +127,97 @@ def test_history_unknown_repo(tmp_path, monkeypatch, capsys):
     assert "no history" in capsys.readouterr().out
 
 
+def _seed_history(db: str, stars_over_time: dict[str, int]):
+    """Seed one repo's snapshots at fixed dates (deterministic tests)."""
+    from reporadar.normalize import normalize_repo
+    from reporadar.storage import connect, upsert_repos
+
+    conn = connect(db)
+    for synced_at, stars in stars_over_time.items():
+        upsert_repos(
+            conn, [normalize_repo({**RAW, "stargazers_count": stars})],
+            synced_at=synced_at,
+        )
+    conn.close()
+
+
+def test_history_since_filters_old_snapshots(tmp_path, monkeypatch, capsys):
+    from datetime import datetime, timezone
+
+    _seed_history(db := str(tmp_path / "r.db"), {
+        "2026-09-01T00:00:00Z": 100,
+        "2026-09-08T00:00:00Z": 101,
+        "2026-09-15T00:00:00Z": 103,
+    })
+
+    monkeypatch.chdir(tmp_path)
+    # unfiltered: all three snapshots
+    rc = cli.main(["history", "org/alpha", "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    lines = [l for l in out.splitlines() if l.startswith("2026-")]
+    assert len(lines) == 3
+
+    # the window is relative to *now*, so compute the largest day count
+    # that still excludes the newest seeded snapshot (2026-09-15): any
+    # smaller window is empty no matter when this test runs
+    cutoff = datetime(2026, 9, 16, tzinfo=timezone.utc)
+    days_empty = max((datetime.now(timezone.utc) - cutoff).days - 1, 1)
+    rc = cli.main(["history", "org/alpha", "--since", str(days_empty),
+                   "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # nothing in the window: the empty message names it, and no delta is
+    # computed against a filtered-out row
+    assert "no history" in out and f"{days_empty}d ago" in out
+
+
+def test_history_since_no_snapshots_in_window(tmp_path, monkeypatch, capsys):
+    from reporadar.normalize import normalize_repo
+    from reporadar.storage import connect, upsert_repos
+
+    db = str(tmp_path / "r.db")
+    conn = connect(db)
+    upsert_repos(conn, [normalize_repo(RAW)], synced_at="2020-01-01T00:00:00Z")
+    conn.close()
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["history", "org/alpha", "--since", "3", "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # empty window: the message names the window, and there are no rows
+    assert "no history" in out
+    assert "3d ago" in out
+
+
+def test_history_since_json_mode(tmp_path, monkeypatch, capsys):
+    import json
+
+    from datetime import datetime, timezone
+
+    _seed_history(db := str(tmp_path / "r.db"), {
+        "2026-09-01T00:00:00Z": 100,
+        "2026-09-15T00:00:00Z": 103,
+    })
+
+    monkeypatch.chdir(tmp_path)
+    # window covering only the newest snapshot (relative to now)
+    days = max(
+        (datetime.now(timezone.utc) - datetime(2026, 9, 15, tzinfo=timezone.utc)).days + 1,
+        1,
+    )
+    rc = cli.main(["history", "org/alpha", "--since", str(days), "--json",
+                   "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    # only the in-window snapshot, and with no previous row returned the
+    # deltas are null rather than a bogus +3 against the filtered-out row
+    assert len(payload) == 1
+    assert payload[0]["synced_at"] == "2026-09-15T00:00:00Z"
+    assert payload[0]["delta_stars"] is None
+
+
 def test_report_prints_language_table_with_deltas(
     tmp_path, monkeypatch, capsys
 ):

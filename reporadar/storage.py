@@ -112,17 +112,22 @@ def get_repos(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def get_history(conn: sqlite3.Connection, full_name: str | None = None,
-                limit: int = 100) -> list[dict[str, Any]]:
-    """Return historical snapshots (newest first), optionally one repo."""
+                limit: int = 100, since: str | None = None) -> list[dict[str, Any]]:
+    """Return historical snapshots (newest first), optionally one repo.
+
+    ``since`` filters to snapshots taken on or after that ISO-8601 UTC
+    timestamp, so a caller can window the deltas over the last N days.
+    """
     if full_name:
         cursor = conn.execute(
-            "SELECT * FROM history WHERE full_name = ? "
+            "SELECT * FROM history WHERE full_name = ? AND synced_at >= ? "
             "ORDER BY synced_at DESC, id DESC LIMIT ?",
-            (full_name, limit),
+            (full_name, since or "1970-01-01T00:00:00Z", limit),
         )
     else:
         cursor = conn.execute(
-            "SELECT * FROM history ORDER BY synced_at DESC, id DESC LIMIT ?",
-            (limit,),
+            "SELECT * FROM history WHERE synced_at >= ? "
+            "ORDER BY synced_at DESC, id DESC LIMIT ?",
+            (since or "1970-01-01T00:00:00Z", limit),
         )
     return [dict(row) for row in cursor.fetchall()]
