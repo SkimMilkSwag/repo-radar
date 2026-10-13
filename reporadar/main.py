@@ -16,6 +16,9 @@ Subcommands:
     report [--db PATH]          Per-language repo count + star/fork totals as
                                 a markdown table, with growth vs the oldest
                                 snapshot in the db.
+    export [--csv PATH]         Dump the current-state table: JSON on stdout,
+                                or CSV via ``--csv`` (file path, or ``-`` for
+                                stdout).  Exits 1 when the db is empty.
 
 ``--json`` (top and history) prints the same data as a JSON document
 instead of a table: for ``top`` a list of repo objects; for ``history``
@@ -23,17 +26,20 @@ a list of snapshot objects, each with ``delta_stars`` / ``delta_forks``
 vs the previous snapshot (null on the oldest one).  Both accept
 ``--db PATH`` as usual.
 
-Exit codes: 0 on success, 1 on API/storage errors, 2 on usage errors
-(argparse's default).
+Exit codes: 0 on success, 1 on API/storage errors or an empty db during
+export, 2 on usage errors (argparse's default).
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
 import sqlite3
 import sys
+from datetime import datetime, timezone
 from typing import Any
 
 from . import __version__
@@ -42,6 +48,24 @@ from .normalize import normalize_repo, summarize
 from .storage import connect, get_history, get_repos, upsert_repos
 
 DEFAULT_DB = "repo_radar.db"
+
+# Columns exported for the current-state table (repos).  description is
+# deliberately last: it's the only free-text field and can contain commas,
+# so CSV consumers that naively split on commas lose nothing from the
+# fixed fields.
+EXPORT_CSV_COLUMNS = [
+    "full_name",
+    "owner",
+    "name",
+    "language",
+    "stars",
+    "forks",
+    "open_issues",
+    "archived",
+    "created_at",
+    "last_synced_at",
+    "description",
+]
 
 
 def _open_db(path: str) -> sqlite3.Connection:
@@ -233,6 +257,85 @@ def _fmt_delta(current: int, baseline: int | None) -> str:
     return _delta(current - baseline)
 
 
+def _row_to_csv_value(value: Any) -> Any:
+    """Map a db cell to its export representation (shared by JSON + CSV).
+
+    NULL becomes the empty string (a literal ``None`` would render as the
+    text ``None`` in CSV, which looks like real data), and booleans — or
+    SQLite's 0/1 integer stand-ins for them — become lowercase
+    ``true``/``false`` so both formats agree.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool) or value in (0, 1):
+        return "true" if value else "false"
+    return value
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """Dump the current snapshot as JSON (default) or CSV (--csv).
+
+    Both formats carry the same rows and column order, most-starred repo
+    first.  Without ``--csv``, stdout is a JSON list of repo objects;
+    with it, the CSV goes to the named file (``-`` selects stdout) and
+    stdout stays clean for piping::
+
+        repo-radar export                  # JSON on stdout
+        repo-radar export --csv snap.csv   # CSV file + stderr note
+
+    NULL cells render as "" in both formats; booleans as true/false in
+    CSV and real booleans in JSON.  Exit codes: 0 on success, 1 when the
+    db is empty or the CSV write fails.
+    """
+    conn = _open_db(args.db)
+    try:
+        rows = get_repos(conn)
+    finally:
+        conn.close()
+    if not rows:
+        print(f"no repos in {args.db} — run 'repo-radar sync <owner>' first")
+        return 1
+
+    if args.csv is not None:
+        try:
+            stream = (sys.stdout if args.csv == "-" else open(args.csv, "w",
+                                                              newline=""))
+        except OSError as exc:
+            print(f"error: writing {args.csv}: {exc}", file=sys.stderr)
+            return 1
+        try:
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow(EXPORT_CSV_COLUMNS)
+            for row in rows:
+                writer.writerow(
+                    _row_to_csv_value(row.get(c)) for c in EXPORT_CSV_COLUMNS
+                )
+            # Buffer first, then flush: a write error (e.g. bad path)
+            # must not leave a half-written CSV behind while the JSON
+            # still went to stdout.
+            payload = buf.getvalue()
+            stream.write(payload)
+        except OSError as exc:
+            print(f"error: writing {args.csv}: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            if args.csv != "-":
+                stream.close()
+    else:
+        # No --csv: stdout is the machine-readable payload, same columns
+        # and row order as the CSV.
+        json_payload = [
+            {c: _row_to_csv_value(row.get(c)) for c in EXPORT_CSV_COLUMNS}
+            for row in rows
+        ]
+        print(json.dumps(json_payload, indent=2))
+
+    if args.csv is not None and args.csv != "-":
+        print(f"exported {len(rows)} repo(s) to {args.csv}", file=sys.stderr)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repo-radar",
@@ -270,6 +373,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--db", default=DEFAULT_DB,
                           help=f"SQLite db path (default {DEFAULT_DB})")
     p_report.set_defaults(func=cmd_report)
+
+    p_export = sub.add_parser(
+        "export", help="dump the current snapshot as CSV and/or JSON")
+    p_export.add_argument("--csv", metavar="PATH", default=None,
+                          help="write a CSV file to PATH ('-' for stdout); "
+                               "JSON is always printed on stdout")
+    p_export.add_argument("--db", default=DEFAULT_DB,
+                          help=f"SQLite db path (default {DEFAULT_DB})")
+    p_export.set_defaults(func=cmd_export)
 
     return parser
 

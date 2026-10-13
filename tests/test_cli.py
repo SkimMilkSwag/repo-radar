@@ -296,3 +296,103 @@ def test_report_empty_db(tmp_path, monkeypatch, capsys):
     rc = cli.main(["report", "--db", db])
     assert rc == 0
     assert "no repos" in capsys.readouterr().out
+
+
+def _seed_db(db: str):
+    """Seed a db with alpha (100 stars, has description) and beta."""
+    from reporadar.normalize import normalize_repo
+    from reporadar.storage import connect, upsert_repos
+
+    conn = connect(db)
+    upsert_repos(
+        conn,
+        [normalize_repo(RAW), normalize_repo(RAW_B)],
+        synced_at="2026-09-15T00:00:00Z",
+    )
+    conn.close()
+
+
+def test_export_json_lists_all_repos(tmp_path, monkeypatch, capsys):
+    import json
+
+    db = str(tmp_path / "r.db")
+    _seed_db(db)
+    monkeypatch.chdir(tmp_path)
+
+    rc = cli.main(["export", "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    # every tracked repo, most-starred first, with the full export columns
+    assert [r["full_name"] for r in payload] == ["org/alpha", "org/beta"]
+    for row in payload:
+        assert set(row) == set(cli.EXPORT_CSV_COLUMNS)
+    alpha = next(r for r in payload if r["full_name"] == "org/alpha")
+    assert alpha["stars"] == 100
+    assert alpha["language"] == "Python"
+    # archived comes back as a lowercase string, not 0/None noise
+    assert alpha["archived"] == "false"
+
+
+def test_export_csv_file_matches_json(tmp_path, monkeypatch, capsys):
+    import csv
+
+    db = str(tmp_path / "r.db")
+    csv_path = str(tmp_path / "snapshot.csv")
+    _seed_db(db)
+    monkeypatch.chdir(tmp_path)
+
+    rc = cli.main(["export", "--csv", csv_path, "--db", db])
+    err = capsys.readouterr().err
+    assert rc == 0
+    # the file is written, and stdout stays clean (no JSON mixed in) so
+    # only the stderr note reports the write — with the path as given
+    assert f"exported 2 repo(s) to {csv_path}" in err
+
+    with open(csv_path, newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert [r["full_name"] for r in rows] == ["org/alpha", "org/beta"]
+    # NULL description renders as the empty string, not 'None'
+    beta = next(r for r in rows if r["full_name"] == "org/beta")
+    assert beta["description"] == ""
+    # booleans use the same true/false form as the JSON export
+    alpha = next(r for r in rows if r["full_name"] == "org/alpha")
+    assert alpha["archived"] == "false"
+    assert alpha["stars"] == "100"
+
+
+def test_export_csv_to_stdout(tmp_path, monkeypatch, capsys):
+    import csv
+    import io
+
+    db = str(tmp_path / "r.db")
+    _seed_db(db)
+    monkeypatch.chdir(tmp_path)
+
+    rc = cli.main(["export", "--csv", "-", "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # stdout is pure CSV when --csv - is used (no JSON mixed in)
+    header, *data = out.splitlines()
+    assert header.startswith("full_name")
+    parsed = list(csv.DictReader(io.StringIO(out)))
+    assert len(parsed) == 2
+
+
+def test_export_csv_bad_path_returns_1(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "r.db")
+    _seed_db(db)
+    monkeypatch.chdir(tmp_path)
+
+    rc = cli.main(["export", "--csv", "no-such-dir/out.csv", "--db", db])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error:" in err and "out.csv" in err
+
+
+def test_export_empty_db_returns_1(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "r.db")
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["export", "--db", db])
+    assert rc == 1
+    assert "no repos" in capsys.readouterr().out
