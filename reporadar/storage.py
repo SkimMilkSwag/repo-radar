@@ -49,7 +49,22 @@ CREATE TABLE IF NOT EXISTS history (
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_name_time ON history (full_name, synced_at);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS repo_search USING fts5(
+    name, full_name UNINDEXED, description,
+    content='repos', content_rowid='rowid'
+);
 """
+
+
+def _fts5_available(conn: sqlite3.Connection) -> bool:
+    """True when this SQLite build ships FTS5 (every official build does)."""
+    try:
+        conn.execute("CREATE VIRTUAL TABLE __fts5_probe USING fts5(x)")
+        conn.execute("DROP TABLE __fts5_probe")
+        return True
+    except sqlite3.OperationalError:
+        return False
 
 
 def utcnow() -> str:
@@ -62,7 +77,17 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # Dbs created before repo_search existed have a stale external-content
+    # index: rebuild it from repos so search covers everything already stored.
+    if _fts5_available(conn):
+        conn.execute("INSERT INTO repo_search(repo_search) VALUES('rebuild')")
+        conn.commit()
     return conn
+
+
+def _reindex_all(conn: sqlite3.Connection) -> None:
+    """Rebuild the whole FTS index from repos (cheap; called once per sync)."""
+    conn.execute("INSERT INTO repo_search(repo_search) VALUES('rebuild')")
 
 
 def upsert_repos(conn: sqlite3.Connection, repos: list[dict[str, Any]],
@@ -100,6 +125,10 @@ def upsert_repos(conn: sqlite3.Connection, repos: list[dict[str, Any]],
     with conn:
         conn.executemany(stmt, rows)
         conn.executemany(h_stmt, h_rows)
+        if _fts5_available(conn):
+            # one rebuild per sync keeps the index consistent with whatever
+            # was just upserted (inserts and description edits alike)
+            _reindex_all(conn)
     return len(rows)
 
 
@@ -108,6 +137,40 @@ def get_repos(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     cursor = conn.execute(
         "SELECT * FROM repos ORDER BY stars DESC, full_name ASC"
     )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def search_repos(conn: sqlite3.Connection, term: str, limit: int = 20) -> list[dict[str, Any]]:
+    """Full-text search over repo names and descriptions.
+
+    Uses the FTS5 ``repo_search`` index when this SQLite build has it;
+    otherwise falls back to LIKE scans so a minimal build still works.
+    Results come back most-starred first, like every other view in
+    repo-radar.  A multi-word term matches any word (OR), which is what
+    makes it feel like search rather than exact-substring matching.
+    """
+    term = term.strip()
+    if not term:
+        return []
+    if _fts5_available(conn):
+        # quote each word as a bare FTS5 string to keep quotes/specials safe
+        words = " OR ".join(
+            '"{}"'.format(w.replace('"', '""')) for w in term.split()
+        )
+        cursor = conn.execute(
+            "SELECT r.* FROM repo_search s "
+            "JOIN repos r ON r.rowid = s.rowid "
+            "WHERE repo_search MATCH ? "
+            "ORDER BY r.stars DESC, r.full_name ASC LIMIT ?",
+            (words, limit),
+        )
+    else:
+        like = "%" + " %".join(f"%{w}%" for w in term.split()) + "%"
+        cursor = conn.execute(
+            "SELECT * FROM repos WHERE name LIKE ? OR description LIKE ? "
+            "ORDER BY stars DESC, full_name ASC LIMIT ?",
+            (like, like, limit),
+        )
     return [dict(row) for row in cursor.fetchall()]
 
 

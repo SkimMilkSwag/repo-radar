@@ -18,7 +18,9 @@ from reporadar.client import (  # noqa: E402
     next_url,
 )
 from reporadar.normalize import REPO_COLUMNS, normalize_repo, summarize  # noqa: E402
-from reporadar.storage import connect, get_history, get_repos, upsert_repos  # noqa: E402
+from reporadar.storage import (  # noqa: E402
+    connect, get_history, get_repos, search_repos, upsert_repos,
+)
 
 RAW_REPO = {
     "full_name": "some-org/some-repo",
@@ -189,3 +191,99 @@ def test_history_limit(tmp_path):
     upsert_repos(conn, [normalize_repo(RAW_REPO)], synced_at="2026-09-16T00:00:00Z")
     upsert_repos(conn, [normalize_repo(RAW_REPO)], synced_at="2026-09-17T00:00:00Z")
     assert len(get_history(conn, "some-org/some-repo", limit=2)) == 2
+
+
+# --- full-text search (FTS5) ---------------------------------------------
+
+
+def _seed_search_db(tmp_path):
+    """Two repos: one with a rich description, one without."""
+    conn = connect(_tmp_db(tmp_path))
+    upsert_repos(
+        conn,
+        [
+            normalize_repo({
+                **RAW_REPO,
+                "description": "A fast deployment toolchain for CI pipelines",
+            }),
+            normalize_repo({
+                "full_name": "o/beta", "name": "beta",
+                "owner": {"login": "o"}, "language": "Go",
+                "stargazers_count": 5, "forks_count": 1,
+                "description": None,
+            }),
+        ],
+        synced_at="2026-09-15T00:00:00Z",
+    )
+    return conn
+
+
+def test_search_finds_by_description_word(tmp_path):
+    conn = _seed_search_db(tmp_path)
+    rows = search_repos(conn, "pipelines")
+    assert [r["full_name"] for r in rows] == ["some-org/some-repo"]
+
+
+def test_search_multiword_is_or(tmp_path):
+    conn = _seed_search_db(tmp_path)
+    # "some" matches some-repo's name; "beta" matches beta's name: the
+    # words are OR'd, so both repos come back
+    rows = search_repos(conn, "some beta")
+    assert {r["full_name"] for r in rows} == {"some-org/some-repo", "o/beta"}
+
+
+def test_search_phrase_match_within_one_repo(tmp_path):
+    # words that co-occur in a single repo's description match together
+    conn = _seed_search_db(tmp_path)
+    rows = search_repos(conn, "deployment toolchain")
+    assert [r["full_name"] for r in rows] == ["some-org/some-repo"]
+
+
+def test_search_no_match_returns_empty(tmp_path):
+    conn = _seed_search_db(tmp_path)
+    assert search_repos(conn, "zorp") == []
+
+
+def test_search_strips_and_ignores_blank_term(tmp_path):
+    conn = _seed_search_db(tmp_path)
+    assert search_repos(conn, "   ") == []
+    assert search_repos(conn, "") == []
+
+
+def test_search_special_characters_do_not_raise(tmp_path):
+    # quotes and other FTS5 metacharacters must not break the MATCH clause
+    conn = _seed_search_db(tmp_path)
+    rows = search_repos(conn, 'deploy"chain')
+    assert isinstance(rows, list)
+
+
+def test_search_limit_caps_results(tmp_path):
+    conn = _seed_search_db(tmp_path)
+    # every seeded repo matches "o" (it appears in both full names); cap at 1
+    rows = search_repos(conn, "beta", limit=1)
+    assert len(rows) == 1
+
+
+def test_search_follows_description_updates_on_resync(tmp_path):
+    conn = _seed_search_db(tmp_path)
+    # re-sync with a new description: old words leave the index, new ones join
+    upsert_repos(
+        conn,
+        [normalize_repo({
+            **RAW_REPO,
+            "description": "A monitoring agent for edge nodes",
+        })],
+        synced_at="2026-09-16T00:00:00Z",
+    )
+    assert search_repos(conn, "monitoring")  # new word is indexed
+    assert search_repos(conn, "pipelines") == []  # old word is gone
+
+
+def test_search_survives_reopen_of_existing_db(tmp_path):
+    # a db created earlier (pre-existing file) gets its index rebuilt on open
+    conn = _seed_search_db(tmp_path)
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    conn.close()
+    conn = connect(path)
+    rows = search_repos(conn, "pipelines")
+    assert [r["full_name"] for r in rows] == ["some-org/some-repo"]

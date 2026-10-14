@@ -487,3 +487,83 @@ def test_export_empty_db_returns_1(tmp_path, monkeypatch, capsys):
     rc = cli.main(["export", "--db", db])
     assert rc == 1
     assert "no repos" in capsys.readouterr().out
+
+
+def test_search_prints_matches_with_description(tmp_path, monkeypatch, capsys):
+    import json
+
+    from reporadar.normalize import normalize_repo
+    from reporadar.storage import connect, upsert_repos
+
+    db = str(tmp_path / "r.db")
+    conn = connect(db)
+    upsert_repos(
+        conn,
+        [
+            {**normalize_repo(RAW), "description": "A fast deployment toolchain for CI pipelines"},
+            normalize_repo(RAW_B),
+        ],
+        synced_at="2026-09-15T00:00:00Z",
+    )
+    conn.close()
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["search", "pipelines", "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    # the match is listed in the top-style table, with its description
+    assert "org/alpha" in out
+    assert "deployment toolchain" in out
+    # beta has no description mentioning the term: not listed
+    assert "org/beta" not in out
+
+
+def test_search_json_emits_repo_rows(tmp_path, monkeypatch, capsys):
+    import json
+
+    from reporadar.normalize import normalize_repo
+    from reporadar.storage import connect, upsert_repos
+
+    db = str(tmp_path / "r.db")
+    conn = connect(db)
+    upsert_repos(
+        conn,
+        [
+            {**normalize_repo(RAW), "description": "A fast deployment toolchain for CI pipelines"},
+            normalize_repo(RAW_B),
+        ],
+        synced_at="2026-09-15T00:00:00Z",
+    )
+    conn.close()
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["search", "pipelines", "--json", "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    payload = json.loads(out)
+    assert len(payload) == 1
+    assert payload[0]["full_name"] == "org/alpha"
+
+
+def test_search_no_match_prints_message(tmp_path, monkeypatch, capsys):
+    from reporadar.normalize import normalize_repo
+    from reporadar.storage import connect, upsert_repos
+
+    db = str(tmp_path / "r.db")
+    conn = connect(db)
+    upsert_repos(conn, [normalize_repo(RAW)], synced_at="2026-09-15T00:00:00Z")
+    conn.close()
+
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["search", "zorp", "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "no repo matches" in out
+
+
+def test_search_empty_db_returns_1(tmp_path, monkeypatch, capsys):
+    db = str(tmp_path / "r.db")
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["search", "anything", "--db", db])
+    assert rc == 1
+    assert "no repos" in capsys.readouterr().out

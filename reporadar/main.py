@@ -21,6 +21,10 @@ Subcommands:
     export [--csv PATH]         Dump the current-state table: JSON on stdout,
                                 or CSV via ``--csv`` (file path, or ``-`` for
                                 stdout).  Exits 1 when the db is empty.
+    search TERM [--limit N]     Full-text search over repo names and
+                                descriptions (SQLite FTS5; LIKE fallback on
+                                minimal builds).  Multi-word terms match any
+                                word; results are most-starred first.
 
 ``--json`` (top and history) prints the same data as a JSON document
 instead of a table: for ``top`` a list of repo objects; for ``history``
@@ -47,7 +51,7 @@ from typing import Any
 from . import __version__
 from .client import APIError, list_repos
 from .normalize import normalize_repo, summarize
-from .storage import connect, get_history, get_repos, upsert_repos
+from .storage import connect, get_history, get_repos, search_repos, upsert_repos
 
 DEFAULT_DB = "repo_radar.db"
 
@@ -343,6 +347,43 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_search(args: argparse.Namespace) -> int:
+    """Full-text search over tracked repos (names + descriptions).
+
+    Multi-word terms are OR'd word-by-word, so ``search deploy ci`` finds
+    repos matching either word.  Output is a table in the same shape as
+    ``top`` — stars, forks, language, repo name — with a short description
+    line under each match; ``--json`` emits the full row objects instead.
+    Exit codes: 0 on success (including no matches), 1 when the db is empty.
+    """
+    conn = _open_db(args.db)
+    try:
+        rows = search_repos(conn, args.term, limit=args.limit)
+        empty = not get_repos(conn)
+    finally:
+        conn.close()
+
+    if args.json:
+        print(json.dumps([dict(r) for r in rows], indent=2))
+        return 0 if rows or not empty else 1
+    if empty:
+        print(f"no repos in {args.db} — run 'repo-radar sync <owner>' first")
+        return 1
+    if not rows:
+        print(f"no repo matches {args.term!r} in {args.db}")
+        return 0
+
+    header = f"{'STARS':<6} {'FORKS':<5} {'LANG':<13} REPO"
+    print(header)
+    print("-" * len(header))
+    for row in rows:
+        lang = (row["language"] or "-")[:12]
+        print(f"{row['stars']:<6} {row['forks']:<5} {lang:<13} {row['full_name']}")
+        if row.get("description"):
+            print(f"       {row['description']}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repo-radar",
@@ -391,6 +432,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--db", default=DEFAULT_DB,
                           help=f"SQLite db path (default {DEFAULT_DB})")
     p_export.set_defaults(func=cmd_export)
+
+    p_search = sub.add_parser(
+        "search", help="full-text search over repo names and descriptions")
+    p_search.add_argument("term",
+                          help="search term; multi-word terms match any word")
+    p_search.add_argument("--limit", type=int, default=20,
+                          help="max matches to show (default 20)")
+    p_search.add_argument("--db", default=DEFAULT_DB)
+    p_search.add_argument("--json", action="store_true",
+                          help="print a JSON list of matching repo rows")
+    p_search.set_defaults(func=cmd_search)
 
     return parser
 

@@ -49,12 +49,13 @@ snapshot — the first snapshot has no delta by definition.
 |---------|-------|-------|
 | `sync OWNER...` | `--db PATH` | db defaults to `./repo_radar.db`; one or more owners per run, all merged into the same db |
 | `top [N]` | `--db PATH`, `--json` | N defaults to 10; `--json` prints a JSON list of repos |
-| `history REPO` | `--limit N`, `--db PATH`, `--json` | N defaults to 20 snapshots; `--json` prints snapshots with delta fields |
+| `history REPO` | `--limit N`, `--since DAYS`, `--db PATH`, `--json` | N defaults to 20 snapshots; `--json` prints snapshots with delta fields |
 | `report` | `--db PATH` | markdown table: per-language totals + growth since the oldest snapshot |
+| `search TERM` | `--limit N`, `--db PATH`, `--json` | full-text search over names + descriptions (SQLite FTS5; LIKE fallback on minimal builds); multi-word terms OR each word; most-starred first |
 
 ## Using the db directly
 
-The schema is deliberately boring — two tables, plain columns:
+The schema is deliberately boring — three tables, plain columns:
 
 ```sql
 sqlite3 repo_radar.db
@@ -67,6 +68,12 @@ FROM repos GROUP BY lang ORDER BY 2 DESC;
 SELECT synced_at, stars,
        stars - LAG(stars) OVER (ORDER BY synced_at) AS delta
 FROM history WHERE full_name = 'owner/name';
+
+-- full-text search over names and descriptions
+SELECT r.full_name, r.stars
+FROM repo_search s JOIN repos r ON r.rowid = s.rowid
+WHERE repo_search MATCH '"deploy" OR "ci"'
+ORDER BY r.stars DESC;
 ```
 
 Run `sync` on a schedule (cron, launchd, whatever) and the history table
@@ -93,7 +100,7 @@ Offline: the network layer is monkeypatched and every test uses a temp db.
 
 ```bash
 python -m pytest tests/ -q
-# 27 passed
+# 48 passed
 ```
 
 ## License
