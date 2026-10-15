@@ -15,9 +15,11 @@ Subcommands:
                                 first, with star/fork deltas vs the previous
                                 snapshot; --since windows it to the last N
                                 days.
-    report [--db PATH]          Per-language repo count + star/fork totals as
+    report [--db PATH] [--since DAYS]
+                                Per-language repo count + star/fork totals as
                                 a markdown table, with growth vs the oldest
-                                snapshot in the db.
+                                snapshot in the db (or within the last DAYS
+                                days when --since is given).
     export [--csv PATH]         Dump the current-state table: JSON on stdout,
                                 or CSV via ``--csv`` (file path, or ``-`` for
                                 stdout).  Exits 1 when the db is empty.
@@ -191,14 +193,20 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     Language rows show the current repo count and star/fork sums from the
     latest state, plus deltas vs the oldest snapshot in this db (i.e.
-    growth since tracking started).  The ``Total`` row covers every
-    tracked repo; when only one snapshot exists, nothing has moved yet,
-    so all deltas are 0.
+    growth since tracking started).  With ``--since DAYS`` the baseline is
+    instead the oldest snapshot within that window, so the table reports
+    growth over the recent period rather than all time.  The ``Total`` row
+    covers every tracked repo; when only one snapshot exists (or none in
+    the window), nothing has moved yet, so all deltas are 0 / ``—``.
     """
+    since = None
+    if args.since is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=args.since)
+        since = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
     conn = _open_db(args.db)
     try:
         repos = get_repos(conn)
-        history = get_history(conn, full_name=None)
+        history = get_history(conn, full_name=None, since=since)
     finally:
         conn.close()
     if not repos:
@@ -213,13 +221,17 @@ def cmd_report(args: argparse.Namespace) -> int:
         stats["stars"] += row["stars"]
         stats["forks"] += row["forks"]
 
-    # Baseline = the oldest snapshot in the db; deltas measure everything
-    # since tracking started.  The very first sync has no baseline and
-    # reports 0 across the board.
-    oldest_time = min(h["synced_at"] for h in history)
+    # Baseline = the oldest snapshot in scope (all history, or the
+    # --since window); deltas measure growth since then.  A single
+    # snapshot — or an empty window — has no baseline and reports
+    # 0 / '—' across the board.
+    if history:
+        oldest_time = min(h["synced_at"] for h in history)
+    else:
+        oldest_time = None
     baseline: dict[str, list[int]] = {}
     for snap in history:
-        if snap["synced_at"] == oldest_time:
+        if oldest_time is not None and snap["synced_at"] == oldest_time:
             b = baseline.setdefault(snap["language"] or "(none)", [0, 0])
             b[0] += snap["stars"]
             b[1] += snap["forks"]
@@ -422,6 +434,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_report = sub.add_parser("report", help="per-language totals + growth")
     p_report.add_argument("--db", default=DEFAULT_DB,
                           help=f"SQLite db path (default {DEFAULT_DB})")
+    p_report.add_argument("--since", type=int, metavar="DAYS", default=None,
+                          help="measure growth vs the oldest snapshot within "
+                               "the last DAYS days instead of all time")
     p_report.set_defaults(func=cmd_report)
 
     p_export = sub.add_parser(

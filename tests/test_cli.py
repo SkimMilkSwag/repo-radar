@@ -567,3 +567,63 @@ def test_search_empty_db_returns_1(tmp_path, monkeypatch, capsys):
     rc = cli.main(["search", "anything", "--db", db])
     assert rc == 1
     assert "no repos" in capsys.readouterr().out
+
+
+def test_report_since_windows_baseline_to_recent_snapshot(
+    tmp_path, monkeypatch, capsys
+):
+    from datetime import datetime, timezone
+
+    _seed_history(db := str(tmp_path / "r.db"), {
+        # oldest snapshot: 100 stars — the all-time baseline
+        "2026-01-01T00:00:00Z": 100,
+        # recent snapshot: 103 stars — becomes the --since baseline
+        "2026-09-15T00:00:00Z": 103,
+    })
+
+    monkeypatch.chdir(tmp_path)
+    # all-time report: +3 growth since 2026-01-01 (100 -> 103)
+    rc = cli.main(["report", "--db", db])
+    out_all = capsys.readouterr().out
+    assert rc == 0
+    total_all = next(l for l in out_all.splitlines() if l.startswith("| **Total"))
+    assert "+3" in total_all
+
+    # window that excludes the oldest snapshot but includes the recent one:
+    # any day count >= this still reaches back to 2026-09-15, and the
+    # baseline becomes that snapshot itself -> growth is 0 within the window
+    days = max(
+        (datetime.now(timezone.utc) - datetime(2026, 9, 15, tzinfo=timezone.utc)).days + 1,
+        1,
+    )
+    rc = cli.main(["report", "--since", str(days), "--db", db])
+    out_win = capsys.readouterr().out
+    assert rc == 0
+    total_win = next(l for l in out_win.splitlines() if l.startswith("| **Total"))
+    # current star count is unchanged, but the delta vs the windowed
+    # baseline (103) is 0 — no +3 from the filtered-out January snapshot
+    assert "103" in total_win and "+3" not in total_win
+
+
+def test_report_since_empty_window_reports_no_growth(
+    tmp_path, monkeypatch, capsys
+):
+    from datetime import datetime, timezone
+
+    _seed_history(db := str(tmp_path / "r.db"), {
+        "2026-09-15T00:00:00Z": 103,
+    })
+
+    monkeypatch.chdir(tmp_path)
+    # a window that ends before the only seeded snapshot: no baseline at
+    # all, so delta columns render '—' and nothing grew within the window
+    cutoff = datetime(2026, 9, 16, tzinfo=timezone.utc)
+    days_empty = max((datetime.now(timezone.utc) - cutoff).days - 1, 1)
+
+    rc = cli.main(["report", "--since", str(days_empty), "--db", db])
+    out = capsys.readouterr().out
+    assert rc == 0
+    total = next(l for l in out.splitlines() if l.startswith("| **Total"))
+    assert "—" in total and "+" not in total
+    # the repo is still tracked, so counts are current even with no baseline
+    assert "103" in total

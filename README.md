@@ -50,7 +50,7 @@ snapshot — the first snapshot has no delta by definition.
 | `sync OWNER...` | `--db PATH` | db defaults to `./repo_radar.db`; one or more owners per run, all merged into the same db |
 | `top [N]` | `--db PATH`, `--json` | N defaults to 10; `--json` prints a JSON list of repos |
 | `history REPO` | `--limit N`, `--since DAYS`, `--db PATH`, `--json` | N defaults to 20 snapshots; `--json` prints snapshots with delta fields |
-| `report` | `--db PATH` | markdown table: per-language totals + growth since the oldest snapshot |
+| `report` | `--db PATH`, `--since DAYS` | markdown table: per-language totals + growth since the oldest snapshot (or within the last N days with `--since`) |
 | `search TERM` | `--limit N`, `--db PATH`, `--json` | full-text search over names + descriptions (SQLite FTS5; LIKE fallback on minimal builds); multi-word terms OR each word; most-starred first |
 
 ## Using the db directly
