@@ -27,6 +27,11 @@ Subcommands:
                                 descriptions (SQLite FTS5; LIKE fallback on
                                 minimal builds).  Multi-word terms match any
                                 word; results are most-starred first.
+    prune OWNER... [--dry-run]  Re-fetch the owners' repos and drop tracked
+                                repos that are gone from GitHub (deleted or
+                                renamed, i.e. no longer in a successful
+                                re-fetch).  History rows are kept; --dry-run
+                                lists what would be removed without deleting.
 
 ``--json`` (top and history) prints the same data as a JSON document
 instead of a table: for ``top`` a list of repo objects; for ``history``
@@ -53,7 +58,8 @@ from typing import Any
 from . import __version__
 from .client import APIError, list_repos
 from .normalize import normalize_repo, summarize
-from .storage import connect, get_history, get_repos, search_repos, upsert_repos
+from .storage import (connect, get_gone_repos, get_history, get_repos,
+                      remove_repos, search_repos, upsert_repos)
 
 DEFAULT_DB = "repo_radar.db"
 
@@ -359,6 +365,55 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune(args: argparse.Namespace) -> int:
+    """Re-sync one or more owners and drop repos that 404 upstream.
+
+    A full sync of every synced owner is compared against the current-state
+    table: any tracked repo whose ``full_name`` was not in a successful
+    re-fetch has been deleted or renamed on GitHub and is pruned.  History
+    rows are kept (a pruned repo's snapshots remain valid data for its
+    lifetime).  Per-owner API errors abort before anything is removed — a
+    failed fetch can't prove a repo is gone, and pruning on incomplete data
+    would delete live repos.  With ``--dry-run`` the list of gone repos is
+    printed without deleting.
+
+    Exit codes: 0 on success (including "nothing to prune"), 1 on an API
+    error or an empty db.
+    """
+    owners = args.owners
+    token = os.environ.get("GH_TOKEN")
+    seen: set[str] = set()
+    for owner in owners:
+        try:
+            raw = list_repos(owner, token=token)
+        except APIError as exc:
+            print(f"error: {owner}: {exc}", file=sys.stderr)
+            return 1
+        for repo in [normalize_repo(r) for r in raw]:
+            seen.add(repo["full_name"])
+
+    conn = _open_db(args.db)
+    try:
+        gone = get_gone_repos(conn, seen)
+        if not gone and not get_repos(conn):
+            print(f"no repos in {args.db} — run 'repo-radar sync <owner>' first")
+            return 1
+        if not gone:
+            print("pruned 0 repo(s); everything tracked is still on GitHub")
+            return 0
+        for row in gone:
+            print(f"gone: {row['full_name']} "
+                  f"(last seen {row['stars']} stars, {row['forks']} forks)")
+        if args.dry_run:
+            print(f"{len(gone)} repo(s) to prune (dry run; nothing removed)")
+            return 0
+        removed = remove_repos(conn, [r["full_name"] for r in gone])
+    finally:
+        conn.close()
+    print(f"pruned {removed} repo(s) from {args.db}")
+    return 0
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     """Full-text search over tracked repos (names + descriptions).
 
@@ -447,6 +502,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--db", default=DEFAULT_DB,
                           help=f"SQLite db path (default {DEFAULT_DB})")
     p_export.set_defaults(func=cmd_export)
+
+    p_prune = sub.add_parser(
+        "prune", help="drop repos no longer on GitHub (404 on re-fetch)")
+    p_prune.add_argument("owners", nargs="+", metavar="OWNER",
+                         help="owners to re-check; tracked repos not in their "
+                              "current repo lists are considered gone")
+    p_prune.add_argument("--dry-run", action="store_true",
+                         help="list the repos that would be pruned without removing them")
+    p_prune.add_argument("--db", default=DEFAULT_DB,
+                         help=f"SQLite db path (default {DEFAULT_DB})")
+    p_prune.set_defaults(func=cmd_prune)
 
     p_search = sub.add_parser(
         "search", help="full-text search over repo names and descriptions")

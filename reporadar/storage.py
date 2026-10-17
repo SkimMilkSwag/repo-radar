@@ -194,3 +194,43 @@ def get_history(conn: sqlite3.Connection, full_name: str | None = None,
             (since or "1970-01-01T00:00:00Z", limit),
         )
     return [dict(row) for row in cursor.fetchall()]
+
+
+def get_gone_repos(conn: sqlite3.Connection,
+                   full_names: set[str]) -> list[dict[str, Any]]:
+    """Return tracked repos whose ``full_name`` is not in ``full_names``.
+
+    Used by the ``prune`` command after a sync: any repo that was 404 on
+    re-fetch (deleted or renamed upstream) is "gone".  Rows come back in the
+    same most-starred-first order as every other view, and each carries its
+    full current-state row so the CLI can report stars/forks of what was
+    removed, not just its name.
+    """
+    cursor = conn.execute(
+        "SELECT * FROM repos ORDER BY stars DESC, full_name ASC"
+    )
+    return [dict(row) for row in cursor.fetchall()
+            if row["full_name"] not in full_names]
+
+
+def remove_repos(conn: sqlite3.Connection, full_names: list[str]) -> int:
+    """Delete repos from the current-state table (and rebuild the FTS index).
+
+    ``history`` rows are deliberately kept: a pruned repo's snapshots are
+    still valid data for its lifetime, and deleting history would silently
+    erase growth numbers the ``report`` command might still want.  Returns
+    the number of repos removed (0 when nothing matched).
+    """
+    if not full_names:
+        return 0
+    with conn:
+        placeholders = ", ".join("?" * len(full_names))
+        cursor = conn.execute(
+            f"DELETE FROM repos WHERE full_name IN ({placeholders})",
+            full_names,
+        )
+        if _fts5_available(conn):
+            # the FTS index is external-content over repos: a plain DELETE
+            # leaves stale entries behind unless the index is rebuilt.
+            _reindex_all(conn)
+    return cursor.rowcount

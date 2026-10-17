@@ -52,6 +52,7 @@ snapshot — the first snapshot has no delta by definition.
 | `history REPO` | `--limit N`, `--since DAYS`, `--db PATH`, `--json` | N defaults to 20 snapshots; `--json` prints snapshots with delta fields |
 | `report` | `--db PATH`, `--since DAYS` | markdown table: per-language totals + growth since the oldest snapshot (or within the last N days with `--since`) |
 | `search TERM` | `--limit N`, `--db PATH`, `--json` | full-text search over names + descriptions (SQLite FTS5; LIKE fallback on minimal builds); multi-word terms OR each word; most-starred first |
+| `prune OWNER...` | `--dry-run`, `--db PATH` | re-fetch the owners and drop tracked repos that are no longer on GitHub (deleted/renamed, i.e. 404 on re-fetch); history rows are kept; per-owner API errors abort before anything is removed |
 
 ## Using the db directly
 
@@ -100,7 +101,7 @@ Offline: the network layer is monkeypatched and every test uses a temp db.
 
 ```bash
 python -m pytest tests/ -q
-# 48 passed
+# 59 passed
 ```
 
 ## License
