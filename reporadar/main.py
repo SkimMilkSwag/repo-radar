@@ -88,10 +88,12 @@ def _open_db(path: str) -> sqlite3.Connection:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     """Fetch one or more owners' repos and upsert them into the db."""
-    return sync_many(args.owners, args.db)
+    return sync_many(args.owners, args.db, private=args.private)
 
 
-def sync_many(owners: list[str], db_path: str) -> int:
+def sync_many(
+    owners: list[str], db_path: str, private: bool = False
+) -> int:
     """Fetch several owners' repos in one run and merge them into ``db_path``.
 
     Each owner's repos are normalized and upserted under the same
@@ -99,12 +101,24 @@ def sync_many(owners: list[str], db_path: str) -> int:
     to the latest value; per-owner errors are reported and counted instead
     of aborting the whole run.  Exit status mirrors a single-owner sync:
     0 when every owner succeeded, 1 when at least one failed.
+
+    With ``private=True`` the underlying ``list_repos`` call passes
+    ``type=all`` so private repos are included; that requires ``GH_TOKEN``
+    to carry ``repo`` scope (the API returns 404 for a token without it).
     """
     token = os.environ.get("GH_TOKEN")
+    if private and not token:
+        # no token at all can't see any private repo — fail fast with a
+        # specific message rather than a confusing 404 per owner.
+        print(
+            "error: --private requires GH_TOKEN to be set (with `repo` scope)",
+            file=sys.stderr,
+        )
+        return 1
     failures = 0
     for owner in owners:
         try:
-            raw = list_repos(owner, token=token)
+            raw = list_repos(owner, token=token, include_private=private)
         except APIError as exc:
             print(f"error: {owner}: {exc}", file=sys.stderr)
             failures += 1
@@ -465,6 +479,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="GitHub org or user name; repeat to sync several")
     p_sync.add_argument("--db", default=DEFAULT_DB,
                         help=f"SQLite db path (default {DEFAULT_DB})")
+    p_sync.add_argument("--private", action="store_true",
+                        help="also fetch private repos (requires GH_TOKEN with "
+                             "repo scope; uses type=all so unscoped tokens 404)")
     p_sync.set_defaults(func=cmd_sync)
 
     p_top = sub.add_parser("top", help="show the most-starred tracked repos")

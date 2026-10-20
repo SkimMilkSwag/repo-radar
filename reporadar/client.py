@@ -84,17 +84,26 @@ def next_url(headers: Mapping[str, str] | None) -> str | None:
     return None
 
 
-def list_repos(owner: str, token: str | None = None) -> list[dict[str, Any]]:
-    """Return every public repo of ``owner`` (follows pagination).
+def list_repos(
+    owner: str, token: str | None = None, include_private: bool = False
+) -> list[dict[str, Any]]:
+    """Return every public repo of ``owner`` (or all repos with --private).
 
-    Pages through ``/orgs/{owner}/repos`` or ``/users/{owner}/repos`` —
-    both accept ``per_page=100``.  GitHub caps a single page at 100, so an
-    org with >100 repos is fetched across multiple requests.
+    Pages through ``/users/{owner}/repos`` — which lists only public repos
+    by default — following ``Link: rel="next"`` headers.  GitHub caps a
+    single page at 100, so an org with >100 repos is fetched across multiple
+    requests.
+
+    With ``include_private=True`` the query becomes ``type=all``, so private
+    repos are included too; that requires ``token`` to carry ``repo`` scope
+    (the API returns 404 for a token without it, which surfaces as an
+    :class:`APIError` — see the ``main.sync --private`` docs).
     """
     if token is None:
         token = os.environ.get("GH_TOKEN")
+    type_param = "all" if include_private else "public"
     url: str | None = (
-        f"https://api.github.com/users/{owner}/repos?per_page=100&type=public"
+        f"https://api.github.com/users/{owner}/repos?per_page=100&type={type_param}"
     )
     repos: list[dict[str, Any]] = []
     while url:
@@ -106,5 +115,5 @@ def list_repos(owner: str, token: str | None = None) -> list[dict[str, Any]]:
         )
         with urllib.request.urlopen(req) as resp:
             repos.extend(json.load(resp))
-            url = next_url(dict(resp.headers))
+            url = next_url(dict(getattr(resp, "headers", None) or {}))
     return repos

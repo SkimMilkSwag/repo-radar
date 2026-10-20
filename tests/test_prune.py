@@ -49,7 +49,7 @@ def test_prune_removes_gone_repo_and_keeps_others(tmp_path, monkeypatch, capsys)
     monkeypatch.chdir(tmp_path)
     # upstream now only has beta: alpha was deleted on GitHub
     monkeypatch.setattr(
-        "reporadar.main.list_repos", lambda owner, token=None: [RAW_B]
+        "reporadar.main.list_repos", lambda owner, token=None, include_private=False: [RAW_B]
     )
 
     rc = cli.main(["prune", "org", "--db", db])
@@ -78,7 +78,7 @@ def test_prune_nothing_gone_is_a_noop(tmp_path, monkeypatch, capsys):
     _seed(db)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        "reporadar.main.list_repos", lambda owner, token=None: [RAW_A, RAW_B]
+        "reporadar.main.list_repos", lambda owner, token=None, include_private=False: [RAW_A, RAW_B]
     )
 
     rc = cli.main(["prune", "org", "--db", db])
@@ -98,7 +98,7 @@ def test_prune_dry_run_lists_but_does_not_remove(tmp_path, monkeypatch, capsys):
     _seed(db)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        "reporadar.main.list_repos", lambda owner, token=None: [RAW_A]
+        "reporadar.main.list_repos", lambda owner, token=None, include_private=False: [RAW_A]
     )
 
     rc = cli.main(["prune", "org", "--dry-run", "--db", db])
@@ -168,7 +168,7 @@ def test_prune_empty_db_returns_1(tmp_path, monkeypatch, capsys):
     db = str(tmp_path / "r.db")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
-        "reporadar.main.list_repos", lambda owner, token=None: [RAW_A]
+        "reporadar.main.list_repos", lambda owner, token=None, include_private=False: [RAW_A]
     )
     rc = cli.main(["prune", "org", "--db", db])
     out = capsys.readouterr().out

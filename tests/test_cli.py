@@ -38,7 +38,7 @@ def test_sync_writes_db_and_prints_summary(tmp_path, monkeypatch, capsys):
     db = str(tmp_path / "r.db")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("reporadar.main.list_repos",
-                       lambda owner, token=None: [RAW, RAW_B])
+                       lambda owner, token=None, include_private=False: [RAW, RAW_B])
 
     rc = cli.main(["sync", "org", "--db", db])
     out = capsys.readouterr().out
@@ -59,7 +59,7 @@ def test_sync_api_error_returns_1(tmp_path, monkeypatch, capsys):
     db = str(tmp_path / "r.db")
     monkeypatch.chdir(tmp_path)
 
-    def boom(owner, token=None):
+    def boom(owner, token=None, include_private=False):
         raise APIError(404, "Not Found")
 
     monkeypatch.setattr("reporadar.main.list_repos", boom)
@@ -341,7 +341,7 @@ def test_sync_merges_multiple_owners_into_one_db(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(
         "reporadar.main.list_repos",
-        lambda owner, token=None: [RAW] if owner == "org" else [RAW_B],
+        lambda owner, token=None, include_private=False: [RAW] if owner == "org" else [RAW_B],
     )
 
     rc = cli.main(["sync", "org", "org2", "--db", db])
@@ -364,7 +364,7 @@ def test_sync_partial_owner_failure_returns_1(tmp_path, monkeypatch, capsys):
     db = str(tmp_path / "r.db")
     monkeypatch.chdir(tmp_path)
 
-    def flaky(owner, token=None):
+    def flaky(owner, token=None, include_private=False):
         if owner == "org-bad":
             raise APIError(404, "Not Found")
         return [RAW]
