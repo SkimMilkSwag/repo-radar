@@ -27,6 +27,12 @@ Subcommands:
                                 descriptions (SQLite FTS5; LIKE fallback on
                                 minimal builds).  Multi-word terms match any
                                 word; results are most-starred first.
+    watch OWNER... [--db PATH]  Sync the owners' repos and print only the
+                                repos whose stars or forks changed since the
+                                previous snapshot in this db.  New repos
+                                (first seen) are listed as "new".  A quiet
+                                run (no changes) prints a single line and
+                                exits 0 — handy for cron jobs.
     prune OWNER... [--dry-run]  Re-fetch the owners' repos and drop tracked
                                 repos that are gone from GitHub (deleted or
                                 renamed, i.e. no longer in a successful
@@ -465,6 +471,105 @@ def cmd_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace) -> int:
+    """Sync owners, then print only repos whose stars/forks moved.
+
+    The watch is a sync with a diff: each owner's current repo list is
+    fetched and upserted into the db exactly like ``sync`` (history rows
+    included), and afterwards only the repos whose star or fork count
+    differs from their previous snapshot are printed — a quiet run for a
+    cron job is a single line.  On the first sync of a repo (no prior
+    history row) it is reported as new; the same counts on a re-sync of an
+    already-tracked repo are silent, which is what makes repeated runs
+    useful.  With ``--json`` the changed repos come out as a list of
+    objects carrying old/new counts and per-field deltas.
+
+    Exit codes: 0 when every owner fetched (including "no changes"),
+    1 when at least one owner's fetch failed.
+    """
+    owners: list[str] = args.owners
+    token = os.environ.get("GH_TOKEN")
+
+    # Fetch + upsert per owner, exactly like sync_many — but remember each
+    # repo's count *before* this run so the diff is vs the prior snapshot.
+    failures = 0
+    fresh: dict[str, dict[str, Any]] = {}  # full_name -> normalized row
+    for owner in owners:
+        try:
+            raw = list_repos(owner, token=token)
+        except APIError as exc:
+            print(f"error: {owner}: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+
+        conn = _open_db(args.db)
+        try:
+            rows = [normalize_repo(r) for r in raw]
+            cursor = conn.execute(
+                "SELECT full_name, stars, forks FROM history "
+                "WHERE id IN (SELECT MAX(id) FROM history GROUP BY full_name)"
+            )
+            prev: dict[str, tuple[int, int]] = {
+                row["full_name"]: (row["stars"], row["forks"])
+                for row in cursor.fetchall()
+            }
+            upsert_repos(conn, rows)
+        finally:
+            conn.close()
+
+        for row in rows:
+            fn = row["full_name"]
+            fresh[fn] = {**row, "_prev": prev.get(fn)}
+
+    if not fresh and not failures:
+        print("no repos fetched")
+        return 1 if failures else 0
+
+    changes: list[tuple[str, int, int, int, int, bool]] = []
+    for fn in sorted(fresh):
+        row = fresh[fn]
+        old = row.pop("_prev")
+        if old is None:
+            # first snapshot of this repo: report it as new
+            changes.append((fn, 0, 0, row["stars"], row["forks"], True))
+        elif row["stars"] != old[0] or row["forks"] != old[1]:
+            changes.append(
+                (fn, old[0], old[1], row["stars"], row["forks"], False)
+            )
+
+    if args.json:
+        payload = [
+            {
+                "full_name": fn,
+                "new": is_new,
+                "old_stars": os_,
+                "old_forks": of_,
+                "stars": ns,
+                "forks": nf,
+                "delta_stars": ns - os_,
+                "delta_forks": nf - of_,
+            }
+            for fn, os_, of_, ns, nf, is_new in changes
+        ]
+        print(json.dumps(payload, indent=2))
+        return 1 if failures else 0
+
+    if not changes:
+        print("no changes since last snapshot")
+        return 1 if failures else 0
+
+    for fn, os_, of_, ns, nf, is_new in changes:
+        if is_new:
+            print(f"new      {ns:<6} {nf:<5} {fn}")
+        else:
+            s_d, f_d = ns - os_, nf - of_
+            s_str = _delta(s_d) if s_d else "0"
+            f_str = _delta(f_d) if f_d else "0"
+            print(f"changed  stars {ns:<6}({s_str:>4})  forks {nf:<5}({f_str:>4})  {fn}")
+
+    return 1 if failures else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repo-radar",
@@ -541,6 +646,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--json", action="store_true",
                           help="print a JSON list of matching repo rows")
     p_search.set_defaults(func=cmd_search)
+
+    p_watch = sub.add_parser(
+        "watch", help="sync owners and print only repos whose stars/forks moved")
+    p_watch.add_argument("owners", nargs="+", metavar="OWNER",
+                         help="GitHub org or user name; repeat to watch several")
+    p_watch.add_argument("--db", default=DEFAULT_DB,
+                         help=f"SQLite db path (default {DEFAULT_DB})")
+    p_watch.add_argument("--json", action="store_true",
+                         help="print changed repos as a JSON list "
+                              "(old/new counts + per-field deltas)")
+    p_watch.set_defaults(func=cmd_watch)
 
     return parser
 
