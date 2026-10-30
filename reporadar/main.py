@@ -33,6 +33,17 @@ Subcommands:
                                 (first seen) are listed as "new".  A quiet
                                 run (no changes) prints a single line and
                                 exits 0 — handy for cron jobs.
+    top-gainers [N] [--since DAYS] [--db PATH]
+                                Rank tracked repos by stars gained since the
+                                first snapshot of each repo (or since the
+                                last DAYS days when --since is given).
+                                New repos added after tracking started show
+                                their current star count as the gain.
+    diff OLD NEW [--db PATH]    Compare two named snapshots: repos added
+                                after OLD, removed before or at NEW, and the
+                                star/fork movement of surviving repos between
+                                the two timestamps.  Names are resolved to
+                                stored snapshot times via ``snapshots``.
     prune OWNER... [--dry-run]  Re-fetch the owners' repos and drop tracked
                                 repos that are gone from GitHub (deleted or
                                 renamed, i.e. no longer in a successful
@@ -59,13 +70,37 @@ import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, TypedDict
+
+
+class _DiffRepoEntry(TypedDict):
+    full_name: str
+    stars: int
+    forks: int
+
+
+class _DiffMovedEntry(_DiffRepoEntry):
+    old_stars: int
+    delta_stars: int
+    old_forks: int
+    delta_forks: int
+
+
+class _DiffPayload(TypedDict):
+    old: str
+    new: str
+    added: list[_DiffRepoEntry]
+    removed: list[_DiffRepoEntry]
+    moved: list[_DiffMovedEntry]
 
 from . import __version__
 from .client import APIError, list_repos
 from .normalize import normalize_repo, summarize
-from .storage import (connect, get_gone_repos, get_history, get_repos,
-                      remove_repos, search_repos, upsert_repos)
+from .storage import (connect, get_first_snapshots, get_gone_repos,
+                      get_history, get_latest_snapshots, get_repos,
+                      list_snapshot_times, resolve_snapshot_time,
+                      remove_repos, search_repos, snapshots_at_or_before,
+                      snapshots_between, upsert_repos)
 
 DEFAULT_DB = "repo_radar.db"
 
@@ -570,6 +605,183 @@ def cmd_watch(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def cmd_top_gainers(args: argparse.Namespace) -> int:
+    """Rank repos by stars gained since their first tracked snapshot.
+
+    Baseline per repo is its *first* history row — the count it had when
+    tracking of that repo started — so the table answers "which repos are
+    quietly accumulating stars?" across heterogeneous tracking start
+    dates.  With ``--since DAYS`` the baseline moves to the oldest
+    snapshot inside the window, and a repo first tracked within the window
+    shows its current star count as the gain (it had 0 stars at tracking
+    start, by definition).
+
+    Exit codes: 0 on success (including an empty db), 1 when the db is empty.
+    """
+    since = None
+    if args.since is not None:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=args.since)
+        since = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn = _open_db(args.db)
+    try:
+        latest: dict[str, dict[str, Any]] = {}
+        baseline: dict[str, dict[str, Any]] = {}
+        if since is None:
+            latest = {r["full_name"]: r for r in get_latest_snapshots(conn)}
+            baseline = {r["full_name"]: r for r in get_first_snapshots(conn)}
+            # a repo first tracked after tracking "started" for others has
+            # no older row to regress to: its gain is everything it has
+        else:
+            oldest_in_window: dict[str, dict[str, Any]] = {}
+            rows = get_history(conn, full_name=None, since=since)
+            for snap in rows:  # newest first from get_history
+                fn = snap["full_name"]
+                if fn not in latest:
+                    latest[fn] = snap
+                # rows are newest-first, so the LAST row we see for a repo is
+                # its oldest snapshot inside the window — that is the baseline.
+                oldest_in_window[fn] = snap
+            baseline = oldest_in_window
+
+        entries = []
+        for fn in sorted(latest):
+            # a repo first tracked after tracking of others started has no
+            # older row: its whole current count is the gain.
+            base_stars = baseline[fn]["stars"] if fn in baseline else 0
+            entries.append({
+                "full_name": fn,
+                "stars_now": latest[fn]["stars"],
+                "stars_base": base_stars,
+                "gained": latest[fn]["stars"] - base_stars,
+            })
+        entries.sort(key=lambda e: (-e["gained"], e["full_name"]))
+    finally:
+        conn.close()
+
+    if args.json:
+        print(json.dumps(entries[: args.n], indent=2))
+        return 0 if entries else 1
+    if not entries:
+        print(f"no repos in {args.db} — run 'repo-radar sync <owner>' first")
+        return 1
+
+    header = f"{'GAINED':>7} {'STARS':>7} REPO"
+    print(header)
+    print("-" * len(header))
+    for e in entries[: args.n]:
+        print(f"{e['gained']:>+7} {e['stars_now']:>7} {e['full_name']}")
+    return 0
+
+
+def cmd_diff(args: argparse.Namespace) -> int:
+    """Compare two named snapshots: added / removed / moved repos.
+
+    Each argument is a snapshot reference — an exact stored timestamp, a
+    1-based index into the distinct sync times (oldest first), or ``first``
+    / ``last``.  OLD must resolve to a snapshot at or before NEW; a bad
+    reference exits 2 with the valid references listed.
+
+    Output sections:
+
+    * **added** — repos tracked at NEW but not yet at OLD (with their count
+      as of NEW);
+    * **removed** — repos tracked at OLD whose last snapshot is at or before
+      OLD's time (i.e. gone from the db by NEW);
+    * **moved** — surviving repos whose stars or forks differ between the
+      two snapshots, with per-field deltas.
+
+    A no-change diff prints a single line and exits 0; an empty db exits 1.
+    """
+    conn = _open_db(args.db)
+    try:
+        if not get_repos(conn) and not get_history(conn):
+            print(f"no repos in {args.db} — run 'repo-radar sync <owner>' first")
+            return 1
+        t_old = resolve_snapshot_time(conn, args.old)
+        t_new = resolve_snapshot_time(conn, args.new)
+        if t_old is None or t_new is None:
+            times = list_snapshot_times(conn)
+            refs = "first, last, " + ", ".join(str(i + 1) for i in range(len(times))) \
+                + ", or an exact timestamp"
+            bad = args.old if t_old is None else args.new
+            print(f"error: {bad!r} is not a stored snapshot ({refs})",
+                  file=sys.stderr)
+            for i, t in enumerate(times):
+                print(f"  {i + 1}: {t}", file=sys.stderr)
+            return 2
+        if t_old > t_new:
+            print(f"error: OLD {t_old} is after NEW {t_new} — swap the arguments",
+                  file=sys.stderr)
+            return 2
+        if t_old == t_new:
+            # an empty (OLD, NEW] window would otherwise report every tracked
+            # repo as removed; two identical references are trivially quiet.
+            print(f"no changes between {t_old} and {t_new}")
+            return 0
+
+        old_state = snapshots_at_or_before(conn, t_old)
+        # The NEW side of the diff must reflect state *as of NEW*, where a repo
+        # counts as present only if it has a snapshot inside (OLD, NEW].  A
+        # repo whose last row is stale (before OLD) is not there at NEW even
+        # though ``synced_at <= NEW`` would match its old row — that staleness
+        # is precisely what "removed" means in this window.
+        new_state = snapshots_between(conn, t_old, t_new)
+
+        added = [fn for fn in new_state if fn not in old_state]
+        removed = sorted(fn for fn in old_state if fn not in new_state)
+
+        moved: list[tuple[str, dict[str, Any], dict[str, Any], int, int]] = []
+        for fn in sorted(set(old_state) & set(new_state)):
+            o, n = old_state[fn], new_state[fn]
+            d_s, d_f = n["stars"] - o["stars"], n["forks"] - o["forks"]
+            if d_s or d_f:
+                moved.append((fn, o, n, d_s, d_f))
+
+        payload: _DiffPayload = {
+            "old": t_old,
+            "new": t_new,
+            "added": [
+                {"full_name": fn, "stars": new_state[fn]["stars"],
+                 "forks": new_state[fn]["forks"]}
+                for fn in sorted(added)
+            ],
+            "removed": [
+                {"full_name": fn, "stars": old_state[fn]["stars"],
+                 "forks": old_state[fn]["forks"]}
+                for fn in sorted(removed)
+            ],
+            "moved": [
+                {"full_name": fn,
+                 "old_stars": o["stars"], "stars": n["stars"],
+                 "delta_stars": d_s,
+                 "old_forks": o["forks"], "forks": n["forks"],
+                 "delta_forks": d_f}
+                for fn, o, n, d_s, d_f in moved
+            ],
+        }
+    finally:
+        conn.close()
+
+    if args.json:
+        print(json.dumps(payload, indent=2))
+        return 0
+    if not payload["added"] and not payload["removed"] and not payload["moved"]:
+        print(f"no changes between {t_old} and {t_new}")
+        return 0
+    print(f"# diff {t_old} -> {t_new}")
+    for item in payload["added"]:
+        print(f"+ {item['full_name']}  stars {item['stars']:<6} "
+              f"forks {item['forks']}")
+    for item in payload["removed"]:
+        print(f"- {item['full_name']}  (last seen {t_old}: "
+              f"{item['stars']} stars, {item['forks']} forks)")
+    for m in payload["moved"]:
+        print(f"~ {m['full_name']}  stars {m['old_stars']} -> {m['stars']} "
+              f"({_delta(m['delta_stars'])})  forks {m['old_forks']} -> {m['forks']} "
+              f"({_delta(m['delta_forks'])})")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repo-radar",
@@ -657,6 +869,31 @@ def build_parser() -> argparse.ArgumentParser:
                          help="print changed repos as a JSON list "
                               "(old/new counts + per-field deltas)")
     p_watch.set_defaults(func=cmd_watch)
+
+    p_gainers = sub.add_parser(
+        "top-gainers", help="rank repos by stars gained since first tracked")
+    p_gainers.add_argument("n", nargs="?", type=int, default=10,
+                           help="how many rows to print (default 10)")
+    p_gainers.add_argument("--since", type=int, metavar="DAYS", default=None,
+                           help="baseline = oldest snapshot within the last "
+                                "DAYS days instead of each repo's first")
+    p_gainers.add_argument("--db", default=DEFAULT_DB)
+    p_gainers.add_argument("--json", action="store_true",
+                           help="print a JSON list (gained/stars_now/stars_base)")
+    p_gainers.set_defaults(func=cmd_top_gainers)
+
+    p_diff = sub.add_parser(
+        "diff", help="compare two snapshots: added / removed / moved repos")
+    p_diff.add_argument("old",
+                        help="older snapshot ref: 'first', 'last', 1-based "
+                             "index, or an exact stored timestamp")
+    p_diff.add_argument("new",
+                        help="newer snapshot ref (same forms as OLD)")
+    p_diff.add_argument("--db", default=DEFAULT_DB)
+    p_diff.add_argument("--json", action="store_true",
+                        help="print the diff as a JSON document "
+                             "{old, new, added, removed, moved}")
+    p_diff.set_defaults(func=cmd_diff)
 
     return parser
 

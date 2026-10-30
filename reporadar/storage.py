@@ -220,6 +220,11 @@ def remove_repos(conn: sqlite3.Connection, full_names: list[str]) -> int:
     still valid data for its lifetime, and deleting history would silently
     erase growth numbers the ``report`` command might still want.  Returns
     the number of repos removed (0 when nothing matched).
+
+    Note: keeping history means "tracked at time T" (reconstructed from
+    history via ``snapshots_at_or_before``) is deliberately *not* the same
+    as "in the current-state table" — a pruned repo still counts as tracked
+    in historical diffs.
     """
     if not full_names:
         return 0
@@ -234,3 +239,109 @@ def remove_repos(conn: sqlite3.Connection, full_names: list[str]) -> int:
             # leaves stale entries behind unless the index is rebuilt.
             _reindex_all(conn)
     return cursor.rowcount
+
+
+def get_latest_snapshots(conn: sqlite3.Connection,
+                         limit: int = 100) -> list[dict[str, Any]]:
+    """Latest stored snapshot per repo (newest sync time overall).
+
+    For repos whose last sync predates the db's newest sync — e.g. a repo
+    that dropped out of a later owner fetch and was pruned — the "latest"
+    is whatever its final history row holds, so star growth up to pruning
+    is still measurable.  Ordering: most recent first.
+    """
+    cursor = conn.execute(
+        "SELECT h.* FROM history h WHERE h.id IN ("
+        "  SELECT MAX(id) FROM history GROUP BY full_name) "
+        "ORDER BY synced_at DESC, id DESC LIMIT ?",
+        (limit,),
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def get_first_snapshots(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """First stored snapshot per repo — the baseline for all-time growth."""
+    cursor = conn.execute(
+        "SELECT * FROM history WHERE id IN "
+        "(SELECT MIN(id) FROM history GROUP BY full_name)"
+    )
+    return [dict(row) for row in cursor.fetchall()]
+
+
+def snapshots_at_or_before(conn: sqlite3.Connection,
+                           synced_at: str) -> dict[str, dict[str, Any]]:
+    """Latest snapshot of every repo at or before ``synced_at``.
+
+    Returns ``{full_name: row}`` — the state of the db as it stood at that
+    timestamp, reconstructed from history.  Repos with no snapshot yet are
+    simply absent; callers diffing two snapshots treat absence as "not
+    tracked then".
+    """
+    cursor = conn.execute(
+        "SELECT h.* FROM history h WHERE h.id IN ("
+        "  SELECT MAX(id) FROM history WHERE synced_at <= ? "
+        "  GROUP BY full_name)",
+        (synced_at,),
+    )
+    return {row["full_name"]: dict(row) for row in cursor.fetchall()}
+
+
+def resolve_snapshot_time(conn: sqlite3.Connection,
+                          name: str) -> str | None:
+    """Resolve a snapshot reference to a stored ``synced_at`` timestamp.
+
+    A reference is either an exact stored timestamp (``2026-10-29T03:00:00Z``)
+    or a 1-based positional index into the distinct sync times, oldest first
+    (``first``, ``last``, ``1``, ``2``, ...).  Returns ``None`` when the
+    reference matches no stored snapshot.  The CLI lists valid references in
+    its error message so users can discover them.
+    """
+    name = name.strip()
+    if name.lower() in ("first", "last"):
+        cursor = conn.execute(
+            "SELECT DISTINCT synced_at FROM history ORDER BY synced_at"
+        )
+        times = [str(row["synced_at"]) for row in cursor.fetchall()]
+        if not times:
+            return None
+        return times[0] if name.lower() == "first" else times[-1]
+    if name.isdigit():
+        idx = int(name) - 1
+        cursor = conn.execute(
+            "SELECT DISTINCT synced_at FROM history ORDER BY synced_at"
+        )
+        times = [str(row["synced_at"]) for row in cursor.fetchall()]
+        return times[idx] if 0 <= idx < len(times) else None
+    # exact timestamp match (compared case-sensitively: timestamps are
+    # stored verbatim by utcnow())
+    cursor = conn.execute(
+        "SELECT 1 FROM history WHERE synced_at = ? LIMIT 1", (name,)
+    )
+    return name if cursor.fetchone() else None
+
+
+def snapshots_between(conn: sqlite3.Connection,
+                      after: str, at_or_before: str) -> dict[str, dict[str, Any]]:
+    """Latest snapshot of every repo with ``after < synced_at <= at_or_before``.
+
+    The state a two-snapshot diff shows *at NEW*: a repo survives only if it
+    has a snapshot inside the (OLD, NEW] window.  A repo whose last row is
+    stale — before OLD — is not "there" even though ``synced_at <= NEW`` would
+    match it; that staleness is exactly what "removed" means in this context.
+    """
+    cursor = conn.execute(
+        "SELECT h.* FROM history h WHERE h.id IN ("
+        "  SELECT MAX(id) FROM history "
+        "  WHERE synced_at > ? AND synced_at <= ? "
+        "  GROUP BY full_name)",
+        (after, at_or_before),
+    )
+    return {row["full_name"]: dict(row) for row in cursor.fetchall()}
+
+
+def list_snapshot_times(conn: sqlite3.Connection) -> list[str]:
+    """Distinct stored snapshot times, oldest first (for error messages)."""
+    cursor = conn.execute(
+        "SELECT DISTINCT synced_at FROM history ORDER BY synced_at"
+    )
+    return [row["synced_at"] for row in cursor.fetchall()]
