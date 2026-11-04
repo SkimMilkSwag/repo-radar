@@ -38,16 +38,24 @@ repo-radar top 5
 # How has one repo's star count moved across your snapshots?
 repo-radar history SkimMilkSwag/repo-radar
 # 2026-09-17T03:12:44Z  stars 0       +0  forks 0      +0
+
+# Annotate a sync (e.g. after a big refactor) and see the label in history:
+repo-radar sync SkimMilkSwag --note post-rewrite
+repo-radar history SkimMilkSwag/repo-radar
+# ...  stars 0       +0  forks 0      +0  [post-rewrite]
 ```
 
 `history` prints newest-first and shows `+N`/`-N` deltas vs the previous
-snapshot — the first snapshot has no delta by definition.
+snapshot — the first snapshot has no delta by definition. A sync's optional
+`--note TEXT` is stamped onto that run's history rows and printed next to the
+matching line, so an annotated snapshot stays identifiable months later (the
+`--json` output carries it as a `note` field).
 
 ### Options
 
 | Command | Flags | Notes |
 |---------|-------|-------|
-| `sync OWNER...` | `--db PATH` | db defaults to `./repo_radar.db`; one or more owners per run, all merged into the same db |
+| `sync OWNER...` | `--db PATH`, `--private`, `--note TEXT` | db defaults to `./repo_radar.db`; one or more owners per run, all merged into the same db; `--note` labels this run's snapshot for `history` output |
 | `top [N]` | `--db PATH`, `--json` | N defaults to 10; `--json` prints a JSON list of repos |
 | `history REPO` | `--limit N`, `--since DAYS`, `--db PATH`, `--json` | N defaults to 20 snapshots; `--json` prints snapshots with delta fields |
 | `report` | `--db PATH`, `--since DAYS` | markdown table: per-language totals + growth since the oldest snapshot (or within the last N days with `--since`) |

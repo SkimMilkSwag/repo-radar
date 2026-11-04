@@ -2,12 +2,15 @@
 
 Subcommands:
 
-    sync OWNER... [--db PATH]   Fetch the owners' public repos from GitHub
+    sync OWNER... [--note TEXT] [--db PATH]
+                                Fetch the owners' public repos from GitHub
                                 and upsert them into the local db (default
                                 ./repo_radar.db).  One or more owners can be
                                 synced in a single run; per-owner errors are
                                 reported without aborting the rest.  Prints
-                                a one-line summary per owner.
+                                a one-line summary per owner.  --note stamps
+                                a free-text label onto this run's snapshot,
+                                shown by `history` next to the matching line.
     top [N] [--db PATH]         Show the N most-starred tracked repos
                                 (default 10) as a small table.
     history REPO [--limit N] [--since DAYS]
@@ -129,11 +132,12 @@ def _open_db(path: str) -> sqlite3.Connection:
 
 def cmd_sync(args: argparse.Namespace) -> int:
     """Fetch one or more owners' repos and upsert them into the db."""
-    return sync_many(args.owners, args.db, private=args.private)
+    return sync_many(args.owners, args.db, private=args.private, note=args.note)
 
 
 def sync_many(
-    owners: list[str], db_path: str, private: bool = False
+    owners: list[str], db_path: str, private: bool = False,
+    note: str | None = None,
 ) -> int:
     """Fetch several owners' repos in one run and merge them into ``db_path``.
 
@@ -146,6 +150,9 @@ def sync_many(
     With ``private=True`` the underlying ``list_repos`` call passes
     ``type=all`` so private repos are included; that requires ``GH_TOKEN``
     to carry ``repo`` scope (the API returns 404 for a token without it).
+
+    ``note`` (optional) is stamped onto every history row this run appends,
+    so ``history`` can show which snapshot the annotation refers to.
     """
     token = os.environ.get("GH_TOKEN")
     if private and not token:
@@ -168,7 +175,7 @@ def sync_many(
         repos = [normalize_repo(r) for r in raw]
         conn = _open_db(db_path)
         try:
-            upsert_repos(conn, repos)
+            upsert_repos(conn, repos, note=note)
         finally:
             conn.close()
 
@@ -242,9 +249,14 @@ def cmd_history(args: argparse.Namespace) -> int:
     for snap, d_stars, d_forks in entries:
         s_delta = "" if d_stars is None else _delta(d_stars)
         f_delta = "" if d_forks is None else _delta(d_forks)
+        note_suffix = ""
+        if snap.get("note"):
+            # annotation lives on the snapshot row itself, so the line that
+            # carries it is unambiguously the one the note refers to
+            note_suffix = f"  [{snap['note']}]"
         print(
             f"{snap['synced_at']}  stars {snap['stars']:<6}{s_delta:>7}  "
-            f"forks {snap['forks']:<5}{f_delta:>7}"
+            f"forks {snap['forks']:<5}{f_delta:>7}{note_suffix}"
         )
     return 0
 
@@ -799,6 +811,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--private", action="store_true",
                         help="also fetch private repos (requires GH_TOKEN with "
                              "repo scope; uses type=all so unscoped tokens 404)")
+    p_sync.add_argument("--note", metavar="TEXT", default=None,
+                        help="free-text label for this sync's snapshot; shown "
+                             "in 'history' output next to the matching line")
     p_sync.set_defaults(func=cmd_sync)
 
     p_top = sub.add_parser("top", help="show the most-starred tracked repos")

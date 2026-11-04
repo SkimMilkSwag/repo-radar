@@ -45,7 +45,8 @@ CREATE TABLE IF NOT EXISTS history (
     open_issues INTEGER NOT NULL DEFAULT 0,
     archived INTEGER NOT NULL DEFAULT 0,
     created_at TEXT,
-    synced_at TEXT NOT NULL
+    synced_at TEXT NOT NULL,
+    note TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_history_name_time ON history (full_name, synced_at);
@@ -77,6 +78,12 @@ def connect(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
+    # Dbs created before the history.note column existed keep working: add
+    # it in place (a no-op with a clear error if it's already there).
+    try:
+        conn.execute("ALTER TABLE history ADD COLUMN note TEXT")
+    except sqlite3.OperationalError:
+        pass
     # Dbs created before repo_search existed have a stale external-content
     # index: rebuild it from repos so search covers everything already stored.
     if _fts5_available(conn):
@@ -91,12 +98,19 @@ def _reindex_all(conn: sqlite3.Connection) -> None:
 
 
 def upsert_repos(conn: sqlite3.Connection, repos: list[dict[str, Any]],
-                 synced_at: str | None = None) -> int:
+                 synced_at: str | None = None,
+                 note: str | None = None) -> int:
     """Upsert normalized rows into ``repos`` and append to ``history``.
 
     Returns the number of rows written.  A single transaction keeps the
     two tables consistent; a crash mid-sync can't leave history without
     state (or vice versa).
+
+    ``note`` is an optional free-text label for this sync (e.g.
+    ``"post-rewrite"``); it is stamped onto every history row appended by
+    this call so ``history`` output can show which snapshot a note refers
+    to.  ``None`` (the default) leaves the column NULL — most runs have no
+    annotation, and NULL keeps old output byte-identical.
     """
     synced_at = synced_at or utcnow()
     cols = ", ".join(REPO_COLUMNS)
@@ -117,10 +131,10 @@ def upsert_repos(conn: sqlite3.Connection, repos: list[dict[str, Any]],
         c for c in REPO_COLUMNS if c != "description"
     )
     n_h = len(h_cols.split(", "))
-    h_stmt = (f"INSERT INTO history ({h_cols}, synced_at) "
-              f"VALUES ({', '.join(['?'] * (n_h + 1))})")
-    h_rows = [tuple(r.get(c) for c in REPO_COLUMNS if c != "description") + (synced_at,)
-              for r in repos]
+    h_stmt = (f"INSERT INTO history ({h_cols}, synced_at, note) "
+              f"VALUES ({', '.join(['?'] * (n_h + 2))})")
+    h_rows = [tuple(r.get(c) for c in REPO_COLUMNS if c != "description")
+              + (synced_at, note) for r in repos]
 
     with conn:
         conn.executemany(stmt, rows)
