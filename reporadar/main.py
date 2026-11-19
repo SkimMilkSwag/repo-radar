@@ -30,6 +30,8 @@ Subcommands:
                                 descriptions (SQLite FTS5; LIKE fallback on
                                 minimal builds).  Multi-word terms match any
                                 word; results are most-starred first.
+                                --out PATH also writes the matches as CSV
+                                (same columns as `export`; '-' for stdout).
     watch OWNER... [--db PATH]  Sync the owners' repos and print only the
                                 repos whose stars or forks changed since the
                                 previous snapshot in this db.  New repos
@@ -481,6 +483,21 @@ def cmd_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def render_search_csv(rows: list[dict[str, Any]]) -> str:
+    """Render search results as a CSV document (header + rows, trailing newline).
+
+    Shares ``EXPORT_CSV_COLUMNS`` and the value mapping with ``export``, so a
+    search export opens in the same spreadsheet as a full snapshot export —
+    only the row selection differs (matches, not the whole db).
+    """
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(EXPORT_CSV_COLUMNS)
+    for row in rows:
+        writer.writerow(_row_to_csv_value(row.get(c)) for c in EXPORT_CSV_COLUMNS)
+    return buf.getvalue()
+
+
 def cmd_search(args: argparse.Namespace) -> int:
     """Full-text search over tracked repos (names + descriptions).
 
@@ -488,7 +505,10 @@ def cmd_search(args: argparse.Namespace) -> int:
     repos matching either word.  Output is a table in the same shape as
     ``top`` — stars, forks, language, repo name — with a short description
     line under each match; ``--json`` emits the full row objects instead.
-    Exit codes: 0 on success (including no matches), 1 when the db is empty.
+    ``--out PATH`` writes the matches as CSV (same columns and value
+    mapping as ``export``; ``-`` selects stdout) and leaves the terminal
+    table alone.  Exit codes: 0 on success (including no matches), 1 when
+    the db is empty or the CSV write fails.
     """
     conn = _open_db(args.db)
     try:
@@ -505,16 +525,58 @@ def cmd_search(args: argparse.Namespace) -> int:
         return 1
     if not rows:
         print(f"no repo matches {args.term!r} in {args.db}")
+        # a no-match search with --out still writes a header-only CSV — an
+        # empty result set is a valid export, and the file's existence is
+        # what downstream steps check for
+        if args.out is not None:
+            try:
+                stream = (sys.stdout if args.out == "-"
+                          else open(args.out, "w", newline=""))
+            except OSError as exc:
+                print(f"error: writing {args.out}: {exc}", file=sys.stderr)
+                return 1
+            try:
+                stream.write(render_search_csv(rows))
+            except OSError as exc:
+                print(f"error: writing {args.out}: {exc}", file=sys.stderr)
+                return 1
+            finally:
+                if args.out != "-":
+                    stream.close()
+            print("exported 0 match(es)", file=sys.stderr)
         return 0
 
-    header = f"{'STARS':<6} {'FORKS':<5} {'LANG':<13} REPO"
-    print(header)
-    print("-" * len(header))
-    for row in rows:
-        lang = (row["language"] or "-")[:12]
-        print(f"{row['stars']:<6} {row['forks']:<5} {lang:<13} {row['full_name']}")
-        if row.get("description"):
-            print(f"       {row['description']}")
+    if rows:
+        if args.out != "-":
+            # terminal view: the top-style table with descriptions
+            header = f"{'STARS':<6} {'FORKS':<5} {'LANG':<13} REPO"
+            print(header)
+            print("-" * len(header))
+            for row in rows:
+                lang = (row["language"] or "-")[:12]
+                print(f"{row['stars']:<6} {row['forks']:<5} {lang:<13} "
+                      f"{row['full_name']}")
+                if row.get("description"):
+                    print(f"       {row['description']}")
+        # CSV export: --out '-' is the *only* thing on stdout (piping-
+        # friendly, like `export --csv -`); a file path leaves stdout free
+        if args.out is not None:
+            try:
+                stream = (sys.stdout if args.out == "-"
+                          else open(args.out, "w", newline=""))
+            except OSError as exc:
+                print(f"error: writing {args.out}: {exc}", file=sys.stderr)
+                return 1
+            try:
+                stream.write(render_search_csv(rows))
+            except OSError as exc:
+                print(f"error: writing {args.out}: {exc}", file=sys.stderr)
+                return 1
+            finally:
+                if args.out != "-":
+                    stream.close()
+            print(f"exported {len(rows)} match(es) to {args.out}",
+                  file=sys.stderr)
     return 0
 
 
@@ -872,6 +934,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_search.add_argument("--db", default=DEFAULT_DB)
     p_search.add_argument("--json", action="store_true",
                           help="print a JSON list of matching repo rows")
+    p_search.add_argument("--out", metavar="PATH", default=None,
+                          help="also write the matches as CSV to PATH "
+                               "('-' for stdout); same columns as 'export'")
     p_search.set_defaults(func=cmd_search)
 
     p_watch = sub.add_parser(
