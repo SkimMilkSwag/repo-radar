@@ -61,6 +61,7 @@ matching line, so an annotated snapshot stays identifiable months later (the
 | `report` | `--db PATH`, `--since DAYS` | markdown table: per-language totals + growth since the oldest snapshot (or within the last N days with `--since`) |
 | `search TERM` | `--limit N`, `--db PATH`, `--json` | full-text search over names + descriptions (SQLite FTS5; LIKE fallback on minimal builds); multi-word terms OR each word; most-starred first |
 | `prune OWNER...` | `--dry-run`, `--db PATH` | re-fetch the owners and drop tracked repos that are no longer on GitHub (deleted/renamed, i.e. 404 on re-fetch); history rows are kept; per-owner API errors abort before anything is removed |
+| `snapshots` | `--db PATH`, `--json` | list stored snapshot times, newest first, with how many repos each covers and any `sync --note` label; the companion to `diff` for discovering which timestamps exist |
 
 ## Using the db directly
 
