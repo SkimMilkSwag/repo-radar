@@ -54,6 +54,15 @@ Subcommands:
                                 renamed, i.e. no longer in a successful
                                 re-fetch).  History rows are kept; --dry-run
                                 lists what would be removed without deleting.
+    snapshots [--db PATH]       List the distinct stored snapshot times,
+                                newest first, with how many repos each covers.
+                                A sync's optional ``--note`` label is shown
+                                next to the time it was stamped onto — this is
+                                the command to run before ``diff`` when you
+                                don't remember which timestamps are stored
+                                (``diff`` and ``history --since`` resolve
+                                times from exactly these rows).  --json emits
+                                a list of {synced_at, repos, note} objects.
 
 ``--json`` (top and history) prints the same data as a JSON document
 instead of a table: for ``top`` a list of repo objects; for ``history``
@@ -856,6 +865,64 @@ def cmd_diff(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_snapshots(args: argparse.Namespace) -> int:
+    """List stored snapshot times, newest first, with per-time repo counts.
+
+    Each distinct ``synced_at`` in the history table is one line; a sync's
+    optional ``--note`` label (see ``sync --note``) is shown next to the time
+    it was stamped onto, so an annotated run stays identifiable.  This is the
+    companion to ``diff``: it shows which snapshot references exist before
+    you pick two to compare, and it explains what ``history --since`` and
+    ``top-gainers --since`` are windowing over.
+
+    A repo counted for a time is one that has a history row *at* that time
+    (a sync touches every owner's repos, so in practice this is the tracked
+    set as of that snapshot).  Exit codes: 0 on success (including "nothing
+    stored yet" — an empty db is a valid state before the first sync), 1 when
+    the history table has no rows at all.
+    """
+    conn = _open_db(args.db)
+    try:
+        cursor = conn.execute(
+            "SELECT synced_at, COUNT(DISTINCT full_name) AS repos, "
+            "GROUP_CONCAT(DISTINCT note) AS notes "
+            "FROM history WHERE note IS NOT NULL "
+            "GROUP BY synced_at"
+        )
+        noted: dict[str, str] = {row["synced_at"]: row["notes"]
+                                 for row in cursor.fetchall()}
+        cursor = conn.execute(
+            "SELECT synced_at, COUNT(DISTINCT full_name) AS repos "
+            "FROM history GROUP BY synced_at"
+        )
+        rows = [dict(r) for r in cursor.fetchall()]
+    finally:
+        conn.close()
+
+    # newest first — a "what's the latest snapshot?" question is the common one
+    rows.sort(key=lambda r: r["synced_at"], reverse=True)
+    entries = [
+        {"synced_at": r["synced_at"], "repos": r["repos"],
+         "note": noted.get(r["synced_at"])}
+        for r in rows
+    ]
+
+    if args.json:
+        print(json.dumps(entries, indent=2))
+        return 0 if entries else 1
+    if not entries:
+        print(f"no snapshots in {args.db} — run 'repo-radar sync <owner>' first")
+        return 1
+
+    header = f"{'SNAPSHOT':<21} {'REPOS':>6} NOTE"
+    print(header)
+    print("-" * len(header))
+    for e in entries:
+        note_suffix = "" if not e["note"] else f"  [{e['note']}]"
+        print(f"{e['synced_at']:<21} {e['repos']:>6}{note_suffix}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repo-radar",
@@ -974,6 +1041,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="print the diff as a JSON document "
                              "{old, new, added, removed, moved}")
     p_diff.set_defaults(func=cmd_diff)
+
+    p_snaps = sub.add_parser(
+        "snapshots", help="list stored snapshot times with repo counts")
+    p_snaps.add_argument("--db", default=DEFAULT_DB,
+                         help=f"SQLite db path (default {DEFAULT_DB})")
+    p_snaps.add_argument("--json", action="store_true",
+                         help="print a JSON list of {synced_at, repos, note}")
+    p_snaps.set_defaults(func=cmd_snapshots)
 
     return parser
 
