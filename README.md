@@ -60,6 +60,7 @@ matching line, so an annotated snapshot stays identifiable months later (the
 | `history REPO` | `--limit N`, `--since DAYS`, `--db PATH`, `--json` | N defaults to 20 snapshots; `--json` prints snapshots with delta fields |
 | `report` | `--db PATH`, `--since DAYS` | markdown table: per-language totals + growth since the oldest snapshot (or within the last N days with `--since`) |
 | `search TERM` | `--limit N`, `--db PATH`, `--json` | full-text search over names + descriptions (SQLite FTS5; LIKE fallback on minimal builds); multi-word terms OR each word; most-starred first |
+| `export [DB]` | `--csv PATH`, `--db PATH` | JSON on stdout, or CSV via `--csv` ('-' for stdout); the db is taken from the DB positional when given, else `--db`, else the default — an explicit `--db` wins over a positional when both are passed; exits 1 on an empty db |
 | `prune OWNER...` | `--dry-run`, `--db PATH` | re-fetch the owners and drop tracked repos that are no longer on GitHub (deleted/renamed, i.e. 404 on re-fetch); history rows are kept; per-owner API errors abort before anything is removed |
 | `snapshots` | `--db PATH`, `--json` | list stored snapshot times, newest first, with how many repos each covers and any `sync --note` label; the companion to `diff` for discovering which timestamps exist |
 
@@ -110,7 +111,7 @@ Offline: the network layer is monkeypatched and every test uses a temp db.
 
 ```bash
 python -m pytest tests/ -q
-# 59 passed
+# 113 passed
 ```
 
 ## License
