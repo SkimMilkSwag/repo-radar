@@ -23,9 +23,13 @@ Subcommands:
                                 a markdown table, with growth vs the oldest
                                 snapshot in the db (or within the last DAYS
                                 days when --since is given).
-    export [--csv PATH]         Dump the current-state table: JSON on stdout,
+    export [DB] [--csv PATH]  Dump the current-state table: JSON on stdout,
                                 or CSV via ``--csv`` (file path, or ``-`` for
-                                stdout).  Exits 1 when the db is empty.
+                                stdout).  The db path is taken from DB when
+                                given, else ``--db PATH``, else the default
+                                ./repo_radar.db — an explicit ``--db`` wins
+                                over a positional when both are passed.
+                                Exits 1 when the db is empty.
     search TERM [--limit N]     Full-text search over repo names and
                                 descriptions (SQLite FTS5; LIKE fallback on
                                 minimal builds).  Multi-word terms match any
@@ -379,22 +383,39 @@ def _row_to_csv_value(value: Any) -> Any:
     return value
 
 
+def _resolve_db(explicit: str, positional: str | None) -> str:
+    """Pick the db path: an explicit ``--db`` wins over a positional DB.
+
+    With neither given the default applies (argparse's default is already
+    in ``explicit``).  The collision rule exists because both forms are
+    accepted — callers who pass both almost always mean the flag, so the
+    positional is treated as an argument only when the flag is absent.
+    """
+    if explicit is not None and explicit != DEFAULT_DB:
+        return explicit
+    return positional if positional is not None else DEFAULT_DB
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     """Dump the current snapshot as JSON (default) or CSV (--csv).
 
     Both formats carry the same rows and column order, most-starred repo
-    first.  Without ``--csv``, stdout is a JSON list of repo objects;
-    with it, the CSV goes to the named file (``-`` selects stdout) and
-    stdout stays clean for piping::
+    first.  The db is ``args.db`` — resolved by the parser so the optional
+    positional DB path and ``--db`` can coexist without colliding (an
+    explicit flag wins over a positional; the default kicks in when
+    neither is given).  Without ``--csv``, stdout is a JSON list of repo
+    objects; with it, the CSV goes to the named file (``-`` selects stdout)
+    and stdout stays clean for piping::
 
         repo-radar export                  # JSON on stdout
+        repo-radar export snap.db          # same, for a specific db file
         repo-radar export --csv snap.csv   # CSV file + stderr note
 
     NULL cells render as "" in both formats; booleans as true/false in
     CSV and real booleans in JSON.  Exit codes: 0 on success, 1 when the
     db is empty or the CSV write fails.
     """
-    conn = _open_db(args.db)
+    conn = _open_db(_resolve_db(args.db, args.db_path))
     try:
         rows = get_repos(conn)
     finally:
@@ -977,6 +998,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_export.add_argument("--csv", metavar="PATH", default=None,
                           help="write a CSV file to PATH ('-' for stdout); "
                                "JSON is always printed on stdout")
+    p_export.add_argument("db_path", nargs="?", default=None, metavar="DB",
+                          help=f"SQLite db path (default {DEFAULT_DB}); "
+                               "ignored when --db is given explicitly")
     p_export.add_argument("--db", default=DEFAULT_DB,
                           help=f"SQLite db path (default {DEFAULT_DB})")
     p_export.set_defaults(func=cmd_export)
