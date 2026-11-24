@@ -518,7 +518,7 @@ def test_search_prints_matches_with_description(tmp_path, monkeypatch, capsys):
     assert "org/beta" not in out
 
 
-def test_search_json_emits_repo_rows(tmp_path, monkeypatch, capsys):
+def test_search_json_emits_export_shaped_rows(tmp_path, monkeypatch, capsys):
     import json
 
     from reporadar.normalize import normalize_repo
@@ -542,7 +542,14 @@ def test_search_json_emits_repo_rows(tmp_path, monkeypatch, capsys):
     assert rc == 0
     payload = json.loads(out)
     assert len(payload) == 1
-    assert payload[0]["full_name"] == "org/alpha"
+    row = payload[0]
+    # --json carries the same projection and value mapping as export:
+    # exactly the CSV column set, no extra db internals, values mapped
+    assert set(row) == set(cli.EXPORT_CSV_COLUMNS)
+    assert "rowid" not in row
+    assert row["full_name"] == "org/alpha"
+    assert row["stars"] == 100
+    assert row["archived"] == "false"
 
 
 def test_search_no_match_prints_message(tmp_path, monkeypatch, capsys):

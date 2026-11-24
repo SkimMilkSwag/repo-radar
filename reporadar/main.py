@@ -534,11 +534,13 @@ def cmd_search(args: argparse.Namespace) -> int:
     Multi-word terms are OR'd word-by-word, so ``search deploy ci`` finds
     repos matching either word.  Output is a table in the same shape as
     ``top`` — stars, forks, language, repo name — with a short description
-    line under each match; ``--json`` emits the full row objects instead.
-    ``--out PATH`` writes the matches as CSV (same columns and value
-    mapping as ``export``; ``-`` selects stdout) and leaves the terminal
-    table alone.  Exit codes: 0 on success (including no matches), 1 when
-    the db is empty or the CSV write fails.
+    line under each match; ``--json`` emits the full row objects in the
+    same shape as ``export`` (the ``EXPORT_CSV_COLUMNS`` projection with
+    CSV value mapping, so no internal columns like ``rowid``).  ``--out
+    PATH`` writes the matches as CSV (same columns and value mapping as
+    ``export``; ``-`` selects stdout) and leaves the terminal table alone.
+    Exit codes: 0 on success (including no matches), 1 when the db is
+    empty or the CSV write fails.
     """
     conn = _open_db(args.db)
     try:
@@ -548,7 +550,13 @@ def cmd_search(args: argparse.Namespace) -> int:
         conn.close()
 
     if args.json:
-        print(json.dumps([dict(r) for r in rows], indent=2))
+        # Same row shape as `export`: the EXPORT_CSV_COLUMNS projection with
+        # CSV value mapping, so a search --json payload carries no internal
+        # columns (rowid) and opens in the same downstream pipeline.
+        print(json.dumps([
+            {c: _row_to_csv_value(r.get(c)) for c in EXPORT_CSV_COLUMNS}
+            for r in rows
+        ], indent=2))
         return 0 if rows or not empty else 1
     if empty:
         print(f"no repos in {args.db} — run 'repo-radar sync <owner>' first")
