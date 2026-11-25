@@ -58,7 +58,7 @@ matching line, so an annotated snapshot stays identifiable months later (the
 | `sync OWNER...` | `--db PATH`, `--private`, `--note TEXT` | db defaults to `./repo_radar.db`; one or more owners per run, all merged into the same db; `--note` labels this run's snapshot for `history` output |
 | `top [N]` | `--db PATH`, `--json` | N defaults to 10; `--json` prints a JSON list of repos |
 | `history REPO` | `--limit N`, `--since DAYS`, `--db PATH`, `--json` | N defaults to 20 snapshots; `--json` prints snapshots with delta fields |
-| `report` | `--db PATH`, `--since DAYS` | markdown table: per-language totals + growth since the oldest snapshot (or within the last N days with `--since`) |
+| `report` | `--db PATH`, `--since DAYS`, `--json` | markdown table: per-language totals + growth since the oldest snapshot (or within the last N days with `--since`); `--json` prints the same data as a JSON document — per-language rows (`language`, `repos`, `stars`, `delta_stars`, `forks`, `delta_forks`; null delta when a language was added after the baseline) plus a total row |
 | `search TERM` | `--limit N`, `--db PATH`, `--json` | full-text search over names + descriptions (SQLite FTS5; LIKE fallback on minimal builds); multi-word terms OR each word; most-starred first |
 | `export [DB]` | `--csv PATH`, `--db PATH` | JSON on stdout, or CSV via `--csv` ('-' for stdout); the db is taken from the DB positional when given, else `--db`, else the default — an explicit `--db` wins over a positional when both are passed; exits 1 on an empty db |
 | `prune OWNER...` | `--dry-run`, `--db PATH` | re-fetch the owners and drop tracked repos that are no longer on GitHub (deleted/renamed, i.e. 404 on re-fetch); history rows are kept; per-owner API errors abort before anything is removed |
@@ -111,7 +111,7 @@ Offline: the network layer is monkeypatched and every test uses a temp db.
 
 ```bash
 python -m pytest tests/ -q
-# 113 passed
+# 118 passed
 ```
 
 ## License
