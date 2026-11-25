@@ -18,11 +18,16 @@ Subcommands:
                                 first, with star/fork deltas vs the previous
                                 snapshot; --since windows it to the last N
                                 days.
-    report [--db PATH] [--since DAYS]
+    report [--db PATH] [--since DAYS] [--json]
                                 Per-language repo count + star/fork totals as
                                 a markdown table, with growth vs the oldest
                                 snapshot in the db (or within the last DAYS
-                                days when --since is given).
+                                days when --since is given).  --json emits the
+                                same data as a JSON document: a list of
+                                per-language rows (language, repos, stars,
+                                delta_stars, forks, delta_forks — null when a
+                                language was added after the baseline) plus a
+                                total row with the same fields.
     export [DB] [--csv PATH]  Dump the current-state table: JSON on stdout,
                                 or CSV via ``--csv`` (file path, or ``-`` for
                                 stdout).  The db path is taken from DB when
@@ -286,6 +291,13 @@ def cmd_report(args: argparse.Namespace) -> int:
     growth over the recent period rather than all time.  The ``Total`` row
     covers every tracked repo; when only one snapshot exists (or none in
     the window), nothing has moved yet, so all deltas are 0 / ``—``.
+
+    With ``--json`` the same data is emitted as a JSON document instead of
+    the markdown table: a ``languages`` list (rows in the same most-starred
+    order, each with ``language``, ``repos``, ``stars``, ``delta_stars``,
+    ``forks``, ``delta_forks`` — a delta is null when the language was first
+    tracked after the baseline, i.e. rendered as '—' in the table) and a
+    ``total`` object with the same fields over all languages.
     """
     since = None
     if args.since is not None:
@@ -334,12 +346,57 @@ def cmd_report(args: argparse.Namespace) -> int:
         )
         return _delta(current - baseline[lang][idx])
 
+    # Per-language rows in the same order as the markdown table (most-starred
+    # language first, name as tiebreak); the JSON payload carries the numbers
+    # themselves instead of their rendered +/- / — strings.
+    ordered = sorted(lang_stats, key=lambda l: (-lang_stats[l]["stars"], l))
+
+    if args.json:
+        # Numbers instead of the table's +/- / — strings; a null delta marks
+        # "no baseline for this language" (the table renders it as '—').
+        def json_delta(current: int, base: int | None) -> int | None:
+            return None if base is None else current - base
+
+        lang_rows = []
+        for lang in ordered:
+            s = lang_stats[lang]
+            b_stars = baseline[lang][0] if lang in baseline else None
+            b_forks = baseline[lang][1] if lang in baseline else None
+            lang_rows.append({
+                "language": lang,
+                "repos": s["repos"],
+                "stars": s["stars"],
+                "delta_stars": json_delta(s["stars"], b_stars),
+                "forks": s["forks"],
+                "delta_forks": json_delta(s["forks"], b_forks),
+            })
+        total = {k: sum(v[k] for v in lang_stats.values())
+                 for k in ("repos", "stars", "forks")}
+        payload = {
+            "languages": lang_rows,
+            "total": {
+                "repos": total["repos"],
+                "stars": total["stars"],
+                "delta_stars": json_delta(
+                    total["stars"],
+                    sum(v[0] for v in baseline.values()) or None,
+                ),
+                "forks": total["forks"],
+                "delta_forks": json_delta(
+                    total["forks"],
+                    sum(v[1] for v in baseline.values()) or None,
+                ),
+            },
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    total = {"repos": 0, "stars": 0, "forks": 0}
     print("# repo-radar report")
     print()
     print("| LANG | REPOS | STARS | Δ | FORKS | Δ |")
     print("| --- | ---: | ---: | ---: | ---: | ---: |")
-    total = {"repos": 0, "stars": 0, "forks": 0}
-    for lang in sorted(lang_stats, key=lambda l: (-lang_stats[l]["stars"], l)):
+    for lang in ordered:
         s = lang_stats[lang]
         for k in total:
             total[k] += s[k]
@@ -999,6 +1056,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--since", type=int, metavar="DAYS", default=None,
                           help="measure growth vs the oldest snapshot within "
                                "the last DAYS days instead of all time")
+    p_report.add_argument("--json", action="store_true",
+                          help="print a JSON document: per-language rows "
+                               "(language/repos/stars/delta_stars/forks/"
+                               "delta_forks) plus a total row")
     p_report.set_defaults(func=cmd_report)
 
     p_export = sub.add_parser(
